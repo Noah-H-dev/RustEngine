@@ -1,0 +1,16 @@
+[package]
+name = "RustEngine"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+beryllium = "0.13.3"
+bytemuck = "1"
+egui_glow = "0.33.3"
+fontdue = "0.9.3"
+glam = "0.30.9"
+glow = "0.17.0"
+ogl33 = { version = "0.2.0", features = ["debug_error_checks"] }
+stb_image = "0.3.0"
+egui = "0.33.3"
+rfd = "0.14"
