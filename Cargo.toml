@@ -14,3 +14,5 @@ ogl33 = { version = "0.2.0", features = ["debug_error_checks"] }
 stb_image = "0.3.0"
 egui = "0.33.3"
 rfd = "0.14"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"

@@ -1,9 +1,29 @@
 use std::sync::Arc;
+use crate::ai_logic::Unit;
 use crate::tools::*;
 use crate::gui::EguiRenderer;
 use crate::shaders::{FRAG_SHADER, VERT_SHADER};
+use serde::{Deserialize, Serialize};
 
 pub const TILE_SIZE: i32 = 32;
+
+/// Persisted unit template, written to / read from units.toml.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct UnitRecord {
+    pub id: u32,
+    pub name: String,
+    pub sprite_id: Option<i32>,
+    /// Every tile position where this template has been placed on the map.
+    #[serde(default)]
+    pub positions: Vec<(i32, i32)>,
+}
+
+/// Top-level TOML wrapper — produces `[[unit]]` array-of-tables syntax.
+#[derive(Serialize, Deserialize, Default)]
+pub struct UnitFile {
+    #[serde(default)]
+    pub unit: Vec<UnitRecord>,
+}
 
 // ── Context trait ──────────────────────────────────────────────────────────────
 /// Implement this for every screen/mode (main menu, gameplay, editor, pause, …).
@@ -28,6 +48,7 @@ pub struct Engine {
     /// World-space offset of the bottom-left corner of the screen.
     /// (0, 0) means the world origin is at the bottom-left of the screen.
     pub camera: (i32, i32),
+
 }
 
 impl Engine {
@@ -89,6 +110,32 @@ impl Engine {
             &mut self.mouse_pos,
         );
     }
+    pub fn load_units(id_path: &str) -> Vec<Unit> {
+        if !std::path::Path::new("units.toml").exists() { return Vec::new(); }
+        let content = std::fs::read_to_string("units.toml").unwrap_or_default();
+        let records = toml::from_str::<UnitFile>(&content)
+            .map(|f| f.unit)
+            .unwrap_or_default();
+        let id_key = load_textures(id_path);
+        let mut unit_vec: Vec<Unit> = Vec::new();
+        for record in &records {
+            if let Some(sprite_id) = record.sprite_id {
+                if let Some(tex_path) = id_key.get(&sprite_id) {
+                    for &position in &record.positions {
+                        let sprite = GLObject::new(
+                            BL_RECTANGLE,
+                            &format!("assets/{}", tex_path),
+                            VERT_SHADER,
+                            FRAG_SHADER,
+                        );
+                        unit_vec.push(Unit::new(position, position, sprite));
+                    }
+                }
+            }
+        }
+        return unit_vec
+    }
+
 }
 
 // ── Physics component ──────────────────────────────────────────────────────────
