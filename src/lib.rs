@@ -227,7 +227,6 @@ pub mod tools {
                 Event::Key { pressed, scancode, modifiers, repeat, .. } => {
                     if pressed && repeat == 0 {
                         match scancode {
-                            SDL_SCANCODE_ESCAPE => *win_state = false,
                             SDL_SCANCODE_W => *action = actions::MOVE {dir: directions::UP},
                             SDL_SCANCODE_S => *action = actions::MOVE {dir: directions::DOWN},
                             SDL_SCANCODE_A => *action = actions::MOVE {dir: directions::LEFT},

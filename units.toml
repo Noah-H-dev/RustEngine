@@ -2,4 +2,5 @@
 id = 1
 name = "test_2"
 sprite_id = 1
-positions = []
+positions = [[2, 16], [6, 15], [9, 16]]
+patrols = [[], [], [[21, 15], [21, 5], [13, 2], [3, 3]]]

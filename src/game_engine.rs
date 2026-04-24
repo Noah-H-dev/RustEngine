@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use crate::ai_logic::Unit;
 use crate::tools::*;
 use crate::gui::EguiRenderer;
@@ -16,6 +17,10 @@ pub struct UnitRecord {
     /// Every tile position where this template has been placed on the map.
     #[serde(default)]
     pub positions: Vec<(i32, i32)>,
+    /// Per-instance patrol paths, parallel to `positions`.
+    /// `patrols[i]` is the ordered waypoint list for the unit at `positions[i]`.
+    #[serde(default)]
+    pub patrols: Vec<Vec<(i32, i32)>>,
 }
 
 /// Top-level TOML wrapper — produces `[[unit]]` array-of-tables syntax.
@@ -29,18 +34,23 @@ pub struct UnitFile {
 /// Implement this for every screen/mode (main menu, gameplay, editor, pause, …).
 /// Return `Some(next_context)` from `update` to transition, `None` to stay.
 pub trait GameContext {
-    fn update(&mut self, engine: &mut Engine) -> Option<Box<dyn GameContext>>;
-    // &mut self lets contexts track click state or other per-frame mutable data.
+    /// Called at a fixed rate (TICK_RATE). `dt` is seconds per tick.
+    fn update(&mut self, engine: &mut Engine, dt: f32) -> Option<Box<dyn GameContext>>;
     fn draw(&mut self, engine: &mut Engine);
 }
 
 // ── Engine ─────────────────────────────────────────────────────────────────────
 pub struct Engine {
+    // Fields holding GL resources must come before `win` so they are dropped
+    // (and their glDelete* calls issued) while the GL context is still alive.
+    pub renderer: EguiRenderer,
+    pub player: Unit,
+    pub units: Vec<Unit>,
+    pub world: World,
     // GlWindow must be declared before Sdl — Rust drops fields in declaration
     // order, and the window must be destroyed before the SDL context.
     win: GlWindow,
     sdl: Sdl,
-    pub renderer: EguiRenderer,
     pub win_open: bool,
     pub current_action: actions,
     pub egui_input: egui::RawInput,
@@ -48,11 +58,10 @@ pub struct Engine {
     /// World-space offset of the bottom-left corner of the screen.
     /// (0, 0) means the world origin is at the bottom-left of the screen.
     pub camera: (i32, i32),
-
 }
 
 impl Engine {
-    pub fn new(title: &str) -> Self {
+    pub fn new( title: &str) -> Self {
         let sdl = init_sdl();
         let win = init_window(title, &sdl);
         let gl = Arc::new(unsafe {
@@ -67,21 +76,38 @@ impl Engine {
             win,
             sdl,
             renderer: EguiRenderer::new(gl),
+            player: Unit::new((0,0),(0,0), GLObject::new(BL_RECTANGLE,"./assets/player.png",VERT_SHADER,FRAG_SHADER)),
             win_open: true,
             current_action: actions::NONE,
             egui_input: egui::RawInput::default(),
             mouse_pos: egui::Pos2::default(),
+            units: Vec::new(),
+            world: World::new_empty(0, 0),
             camera: (0, 0),
         }
     }
 
     /// Drives the context state machine until the window is closed.
     pub fn run(&mut self, mut context: Box<dyn GameContext>) {
+        const TICK_RATE: Duration = Duration::from_millis(16);
+        const DT: f32 = TICK_RATE.as_secs_f32();
+        let mut accumulator = Duration::ZERO;
+        let mut last = Instant::now();
+
         while self.win_open {
+            let now = Instant::now();
+            accumulator += now.duration_since(last);
+            last = now;
+
             self.poll_input();
-            if let Some(next) = context.update(self) {
-                context = next;
+            while accumulator >= TICK_RATE {
+                if let Some(next) = context.update(self, DT) {
+                    context = next;
+                }
+                self.current_action = actions::NONE;
+                accumulator = Duration::ZERO;
             }
+
             clear();
             context.draw(self);
             self.win.swap_window();
@@ -93,7 +119,7 @@ impl Engine {
     }
 
     fn poll_input(&mut self) {
-        self.current_action = actions::NONE;
+
         self.egui_input.events.clear();
         self.egui_input.screen_rect = Some(egui::Rect::from_min_size(
             egui::Pos2::ZERO,
@@ -121,14 +147,16 @@ impl Engine {
         for record in &records {
             if let Some(sprite_id) = record.sprite_id {
                 if let Some(tex_path) = id_key.get(&sprite_id) {
-                    for &position in &record.positions {
+                    for (i, &position) in record.positions.iter().enumerate() {
                         let sprite = GLObject::new(
                             BL_RECTANGLE,
                             &format!("assets/{}", tex_path),
                             VERT_SHADER,
                             FRAG_SHADER,
                         );
-                        unit_vec.push(Unit::new(position, position, sprite));
+                        let mut unit = Unit::new(position, position, sprite);
+                        unit.patrol = record.patrols.get(i).cloned().unwrap_or_default();
+                        unit_vec.push(unit);
                     }
                 }
             }

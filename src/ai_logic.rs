@@ -4,7 +4,7 @@ use std::collections::{BinaryHeap, HashMap};
 use std::cmp::Reverse;
 
 pub struct properties{
-    
+
 }
 
 pub struct Unit {
@@ -21,8 +21,13 @@ impl Unit {
     pub fn new(position: (i32,i32),target_position: (i32,i32), sprite:GLObject) -> Unit {
         return Unit {position,target_position,size: 1.0, patrol: vec!(),patrol_idx:0, path: vec!(), sprite}
     }
-    pub fn draw(&self){
-        self.sprite.draw(self.position.0,self.position.1,self.size);
+    pub fn draw(&self, camera: (i32, i32)){
+        use crate::game_engine::TILE_SIZE;
+        self.sprite.draw(
+            self.position.0 * TILE_SIZE - camera.0,
+            self.position.1 * TILE_SIZE - camera.1,
+            TILE_SIZE as f32,
+        );
     }
     pub fn update(&mut self, world: &World){
         let mut current_move = (0,0);

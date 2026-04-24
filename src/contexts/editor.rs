@@ -1,273 +1,63 @@
+// ══════════════════════════════════════════════════════════════════════════════
+// HOW THIS EDITOR WORKS — AND HOW TO EXTEND IT
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// ── The context system ────────────────────────────────────────────────────────
+// Every screen in the game (menu, gameplay, editor, settings) is a struct that
+// implements `GameContext` (defined in game_engine.rs).  The trait has two
+// methods:
+//
+//   fn update(&mut self, engine, dt) -> Option<Box<dyn GameContext>>
+//   fn draw(&mut self, engine)
+//
+// Returning Some(next) from `update` swaps the running context.  `EditorContext`
+// exits by setting `pending_exit = true`, which `update` picks up and returns
+// `Some(Box::new(MainMenuContext::new()))`.
+//
+// To make a brand-new screen/context:
+//   1. Create `src/contexts/my_screen.rs`, define a `pub struct MyScreenContext`.
+//   2. `impl GameContext for MyScreenContext` with your `update` and `draw`.
+//   3. Add `mod my_screen;` and a `pub use` line in `src/contexts/mod.rs`.
+//   4. Transition into it from any other context by returning it from `update`.
+//
+// ── Adding a new tab to the right panel ──────────────────────────────────────
+// The right panel has three tabs controlled by `RightPanelTab`.  To add one:
+//   1. Add a variant to `RightPanelTab` (e.g. `EventPainter`).
+//   2. In `draw`, find the `ui.selectable_label` row and add your tab button.
+//   3. Add a `RightPanelTab::EventPainter => { … }` arm to the `match active_tab`
+//      block to render the panel content.
+//   4. Handle any paint/click input in the "Act on flags" section (step 5).
+//
+// ── Adding a new field / feature to EditorContext ────────────────────────────
+// All runtime state lives in `EditorContext`.  The pattern is:
+//   1. Add the field (e.g. `my_flag: bool`).
+//   2. Initialise it in both `from_file` and `new_map`.
+//   3. Declare a local `let mut my_flag = false;` at the top of `draw`.
+//   4. Set it inside the egui closure (`if ui.button(…).clicked() { my_flag = true; }`).
+//   5. After the closure, act on it (`if my_flag { self.do_thing(); }`).
+//   This two-phase pattern (collect intent inside closure, act outside) is
+//   necessary because the egui closure borrows `engine` exclusively — you cannot
+//   call `&mut self` methods inside it.
+//
+// ── Persisting new data ───────────────────────────────────────────────────────
+// Map tile data is saved via `World::save` (called when `do_save` is true).
+// Unit templates and their placements live in `units.toml` and are written by
+// `save_units()`.  If you add a new type of placed object, follow the same
+// pattern: a TOML-backed file, a `load_*` helper called in both constructors,
+// and a `save_*` helper called whenever state changes.
+//
+// ── Key helpers ───────────────────────────────────────────────────────────────
+//   screen_to_tile_idx  — converts an egui Pos2 into an index into world.tiles
+//   tile_display_name   — controls how palette entries are labelled in the list
+//   build_sprite_cache  — loads GLObjects keyed by palette id for drawing sprites
+// ══════════════════════════════════════════════════════════════════════════════
+
 use RustEngine::game_engine::{Engine, GameContext, World, TILE_SIZE, UnitRecord, UnitFile};
 use RustEngine::tools::{load_textures, GLObject, BL_RECTANGLE};
 use RustEngine::shaders::{VERT_SHADER, FRAG_SHADER};
 use std::collections::HashMap;
 
-// ── Game sub-menu state (owned by MainMenuContext) ─────────────────────────────
-enum GameSub {
-    Hidden,
-    Open { map_path: String, id_path: String },
-}
-
-impl GameSub {
-    fn is_visible(&self) -> bool { !matches!(self, GameSub::Hidden) }
-}
-
-// ── Editor sub-menu state (owned by MainMenuContext) ───────────────────────────
-enum EditorSub {
-    Hidden,
-    Open { map_path: String, id_path: String },
-    New  { map_path: String, id_path: String, width: String, height: String },
-}
-
-impl EditorSub {
-    fn is_visible(&self) -> bool { !matches!(self, EditorSub::Hidden) }
-    fn is_open(&self)    -> bool { matches!(self, EditorSub::Open { .. }) }
-    fn is_new(&self)     -> bool { matches!(self, EditorSub::New  { .. }) }
-
-    /// Preserve whatever paths the user has already typed when switching sub-forms.
-    fn current_paths(&self) -> (String, String) {
-        match self {
-            EditorSub::Open { map_path, id_path } |
-            EditorSub::New  { map_path, id_path, .. } => (map_path.clone(), id_path.clone()),
-            EditorSub::Hidden => ("./map.txt".into(), "./id.txt".into()),
-        }
-    }
-}
-
-// ── Main menu ──────────────────────────────────────────────────────────────────
-pub struct MainMenuContext {
-    pending_transition: Option<Box<dyn GameContext>>,
-    game_sub: GameSub,
-    editor_sub: EditorSub,
-    error_msg: Option<String>,
-}
-
-impl MainMenuContext {
-    pub fn new() -> Self {
-        MainMenuContext {
-            pending_transition: None,
-            game_sub: GameSub::Hidden,
-            editor_sub: EditorSub::Hidden,
-            error_msg: None,
-        }
-    }
-}
-
-impl GameContext for MainMenuContext {
-    fn update(&mut self, _engine: &mut Engine) -> Option<Box<dyn GameContext>> {
-        self.pending_transition.take()
-    }
-
-    fn draw(&mut self, engine: &mut Engine) {
-        // Boolean flags written inside the closure, acted on after it returns.
-        let mut toggle_game  = false;
-        let mut confirm_game = false;
-        let mut toggle_editor = false;
-        let mut show_open    = false;
-        let mut show_new     = false;
-        let mut confirm_open = false;
-        let mut confirm_new  = false;
-
-        let (w, h) = engine.screen_size();
-        let input = engine.egui_input.clone();
-
-        engine.renderer.render(input, w, h, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ui.add_space(ui.available_height() / 4.0);
-                ui.vertical_centered(|ui| {
-                    ui.heading("RustEngine");
-                    ui.add_space(16.0);
-
-                    // ── New Game ──
-                    let game_fill = if self.game_sub.is_visible() {
-                        egui::Color32::from_rgb(80, 100, 180)
-                    } else {
-                        ui.visuals().widgets.inactive.bg_fill
-                    };
-                    if ui.add_sized([160.0, 40.0], egui::Button::new("New Game").fill(game_fill)).clicked() {
-                        toggle_game = true;
-                    }
-
-                    if self.game_sub.is_visible() {
-                        ui.add_space(4.0);
-                        if let GameSub::Open { map_path, id_path } = &mut self.game_sub {
-                            egui::Grid::new("game_form").num_columns(2).show(ui, |ui| {
-                                ui.label("Filepath: "); ui.text_edit_singleline(map_path); ui.end_row();
-                                ui.label("IDs:");      ui.text_edit_singleline(id_path);  ui.end_row();
-                            });
-                            if ui.button("Start").clicked() { confirm_game = true; }
-                        }
-                    }
-                    ui.add_space(8.0);
-
-                    // ── Editor button (centered) ──
-                    let editor_fill = if self.editor_sub.is_visible() {
-                        egui::Color32::from_rgb(80, 100, 180)
-                    } else {
-                        ui.visuals().widgets.inactive.bg_fill
-                    };
-                    if ui.add_sized([160.0, 40.0], egui::Button::new("Editor").fill(editor_fill)).clicked() {
-                        toggle_editor = true;
-                    }
-
-                    // ── Open File / New File sub-buttons (centered row) ──
-                    if self.editor_sub.is_visible() {
-                        ui.add_space(4.0);
-                        ui.horizontal(|ui| {
-                            let sub_w = 100.0 + 4.0 + 100.0;
-                            let pad = (ui.available_width() - sub_w) / 2.0;
-                            if pad > 0.0 { ui.add_space(pad); }
-                            let open_fill = if self.editor_sub.is_open() {
-                                egui::Color32::from_rgb(50, 130, 50)
-                            } else {
-                                ui.visuals().widgets.inactive.bg_fill
-                            };
-                            if ui.add_sized([100.0, 32.0], egui::Button::new("Open File").fill(open_fill)).clicked() {
-                                show_open = true;
-                            }
-                            ui.add_space(4.0);
-                            let new_fill = if self.editor_sub.is_new() {
-                                egui::Color32::from_rgb(50, 130, 50)
-                            } else {
-                                ui.visuals().widgets.inactive.bg_fill
-                            };
-                            if ui.add_sized([100.0, 32.0], egui::Button::new("New File").fill(new_fill)).clicked() {
-                                show_new = true;
-                            }
-                        });
-                    }
-
-                    // ── File form (shown below when Open or New is active) ──
-                    ui.add_space(12.0);
-                    match &mut self.editor_sub {
-                        EditorSub::Open { map_path, id_path } => {
-                            egui::Grid::new("open_form").num_columns(2).show(ui, |ui| {
-                                ui.label("Filepath: ");  ui.text_edit_singleline(map_path);  ui.end_row();
-                                ui.label("IDs:"); ui.text_edit_singleline(id_path);   ui.end_row();
-                            });
-                            if ui.button("Open").clicked() { confirm_open = true; }
-                        }
-                        EditorSub::New { map_path, id_path, width, height } => {
-                            egui::Grid::new("new_form").num_columns(2).show(ui, |ui| {
-                                ui.label("Map: ");   ui.text_edit_singleline(map_path);                           ui.end_row();
-                                ui.label("Tiles:");  ui.text_edit_singleline(id_path);                            ui.end_row();
-                                ui.label("Width:");  ui.add_sized([60.0, 20.0], egui::TextEdit::singleline(width));  ui.end_row();
-                                ui.label("Height:"); ui.add_sized([60.0, 20.0], egui::TextEdit::singleline(height)); ui.end_row();
-                            });
-                            if ui.button("Create").clicked() { confirm_new = true; }
-                        }
-                        EditorSub::Hidden => {}
-                    }
-
-                    if let Some(msg) = &self.error_msg {
-                        ui.add_space(8.0);
-                        ui.colored_label(egui::Color32::from_rgb(220, 60, 60), msg);
-                    }
-                });
-            });
-        });
-
-        // ── Act on flags now that the closure (and its borrows) have ended ──
-
-        if toggle_game {
-            self.error_msg = None;
-            self.game_sub = if self.game_sub.is_visible() {
-                GameSub::Hidden
-            } else {
-                GameSub::Open { map_path: "./map.txt".into(), id_path: "./id.txt".into() }
-            };
-        }
-
-        if confirm_game {
-            if let GameSub::Open { map_path, id_path } = &self.game_sub {
-                let map = map_path.clone();
-                let ids = id_path.clone();
-                if !std::path::Path::new(&map).exists() {
-                    self.error_msg = Some(format!("Map file not found: {}", map));
-                } else if !std::path::Path::new(&ids).exists() {
-                    self.error_msg = Some(format!("ID file not found: {}", ids));
-                } else {
-                    self.error_msg = None;
-                    self.pending_transition = Some(Box::new(GameRunningContext::new(&map, &ids)));
-                }
-            }
-        }
-
-        if toggle_editor {
-            self.error_msg = None;
-            self.editor_sub = if self.editor_sub.is_visible() {
-                EditorSub::Hidden
-            } else {
-                EditorSub::Open { map_path: "./map.txt".into(), id_path: "./id.txt".into() }
-            };
-        }
-
-        if show_open && !self.editor_sub.is_open() {
-            self.error_msg = None;
-            let (map_path, id_path) = self.editor_sub.current_paths();
-            self.editor_sub = EditorSub::Open { map_path, id_path };
-        }
-
-        if show_new && !self.editor_sub.is_new() {
-            self.error_msg = None;
-            let (map_path, id_path) = self.editor_sub.current_paths();
-            let (sw, sh) = engine.screen_size();
-            let dw = ((sw as i32 + TILE_SIZE - 1) / TILE_SIZE).max(20).to_string();
-            let dh = ((sh as i32 + TILE_SIZE - 1) / TILE_SIZE).max(15).to_string();
-            self.editor_sub = EditorSub::New { map_path, id_path, width: dw, height: dh };
-        }
-
-        if confirm_open {
-            if let EditorSub::Open { map_path, id_path } = &self.editor_sub {
-                let map = map_path.clone();
-                let ids = id_path.clone();
-                match EditorContext::from_file(&map, &ids) {
-                    Ok(ctx) => { self.error_msg = None; self.pending_transition = Some(Box::new(ctx)); }
-                    Err(e)  => { self.error_msg = Some(e); }
-                }
-            }
-        }
-
-        if confirm_new {
-            if let EditorSub::New { map_path, id_path, width, height } = &self.editor_sub {
-                if let (Ok(w), Ok(h)) = (width.parse::<usize>(), height.parse::<usize>()) {
-                    let map = map_path.clone();
-                    let ids = id_path.clone();
-                    match EditorContext::new_map(&map, &ids, w, h) {
-                        Ok(ctx) => { self.error_msg = None; self.pending_transition = Some(Box::new(ctx)); }
-                        Err(e)  => { self.error_msg = Some(e); }
-                    }
-                } else {
-                    self.error_msg = Some("Width and height must be valid integers.".into());
-                }
-            }
-        }
-    }
-}
-
-// ── Gameplay ───────────────────────────────────────────────────────────────────
-pub struct GameRunningContext {
-    world: World,
-}
-
-impl GameRunningContext {
-    pub fn new(map_path: &str, id_path: &str) -> Self {
-        GameRunningContext { world: World::load(map_path, id_path) }
-    }
-}
-
-impl GameContext for GameRunningContext {
-    fn update(&mut self, _engine: &mut Engine) -> Option<Box<dyn GameContext>> {
-        // TODO: handle player input, update world state, return Some(...) to transition
-        None
-    }
-
-    fn draw(&mut self, engine: &mut Engine) {
-        self.world.draw(engine.camera);
-        // TODO: draw game HUD via engine.renderer
-    }
-}
+use super::menus::MainMenuContext;
 
 // ── Editor ─────────────────────────────────────────────────────────────────────
 
@@ -306,6 +96,7 @@ enum SpawnerMode {
     Idle,
     CreatingNew,
     Editing { index: usize },
+    PatrolPainting { unit_id: u32, instance_idx: usize },
 }
 
 /// Ephemeral editor state while creating or editing a Unit — never serialized.
@@ -344,6 +135,8 @@ pub struct EditorContext {
     selected_spawner_id: Option<u32>,
     /// Cached GLObjects keyed by palette id, used to draw unit sprites in the editor.
     unit_sprite_cache: HashMap<i32, GLObject>,
+    /// Panel state saved when entering patrol painting mode, restored on exit.
+    patrol_panel_was_open: bool,
 }
 
 impl EditorContext {
@@ -374,6 +167,7 @@ impl EditorContext {
             spawner_units: Self::load_units(),
             selected_spawner_id: None,
             unit_sprite_cache,
+            patrol_panel_was_open: true,
         })
     }
 
@@ -401,6 +195,7 @@ impl EditorContext {
             spawner_units: Self::load_units(),
             selected_spawner_id: None,
             unit_sprite_cache,
+            patrol_panel_was_open: true,
         })
     }
 
@@ -512,10 +307,20 @@ impl EditorContext {
     fn texture_for_id(&self, id: i32) -> Option<&str> {
         self.palette.iter().find(|e| e.id == id).map(|e| e.path.as_str())
     }
+
+    /// Returns the (unit_id, instance_idx) of the first placed unit at `tile_pos`.
+    fn find_unit_at_tile(&self, tile_pos: (i32, i32)) -> Option<(u32, usize)> {
+        for record in &self.spawner_units {
+            if let Some(i) = record.positions.iter().position(|&p| p == tile_pos) {
+                return Some((record.id, i));
+            }
+        }
+        None
+    }
 }
 
 impl GameContext for EditorContext {
-    fn update(&mut self, _engine: &mut Engine) -> Option<Box<dyn GameContext>> {
+    fn update(&mut self, _engine: &mut Engine, _dt: f32) -> Option<Box<dyn GameContext>> {
         if self.pending_exit {
             return Some(Box::new(MainMenuContext::new()));
         }
@@ -545,6 +350,9 @@ impl GameContext for EditorContext {
         let mut tex_confirm_rename = false;
         let mut tex_cancel_new     = false;
         let mut delete_texture_id: Option<i32> = None;
+        let mut patrol_click_pos:  Option<egui::Pos2> = None;
+        let mut patrol_erase_pos:  Option<egui::Pos2> = None;
+        let mut patrol_esc         = false;
 
         // 1. On the first frame, place the camera so the map starts at the bottom-left.
         let (w, h) = engine.screen_size();
@@ -584,6 +392,12 @@ impl GameContext for EditorContext {
         };
         let spawner_form_open  = matches!(self.spawner_mode, SpawnerMode::CreatingNew | SpawnerMode::Editing { .. });
         let spawner_is_editing = matches!(self.spawner_mode, SpawnerMode::Editing { .. });
+        let is_patrol_painting = matches!(self.spawner_mode, SpawnerMode::PatrolPainting { .. });
+        let patrol_unit_name: String = if let SpawnerMode::PatrolPainting { unit_id, instance_idx } = self.spawner_mode {
+            self.spawner_units.iter().find(|u| u.id == unit_id)
+                .map(|u| format!("{} (instance {})", if u.name.is_empty() { "(unnamed)" } else { &u.name }, instance_idx))
+                .unwrap_or_default()
+        } else { String::new() };
         let selected_spawner_id = self.selected_spawner_id;
         let mut draft_name     = self.spawner_draft.name.clone();
         let draft_sprite       = self.spawner_draft.sprite_id;
@@ -627,6 +441,26 @@ impl GameContext for EditorContext {
             }))
             .collect();
 
+        // Patrol waypoint nodes for the currently selected unit instance.
+        let patrol_nodes: Vec<(egui::Rect, usize)> =
+            if let SpawnerMode::PatrolPainting { unit_id, instance_idx } = self.spawner_mode {
+                self.spawner_units.iter()
+                    .find(|u| u.id == unit_id)
+                    .and_then(|r| r.patrols.get(instance_idx))
+                    .map(|patrol| {
+                        patrol.iter().enumerate().map(|(i, &(tx, ty))| {
+                            let x0 = tx as f32 * ts - cam_x;
+                            let y0 = sh - (ty as f32 + 1.0) * ts + cam_y;
+                            (egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x0 + ts, y0 + ts)), i)
+                        }).collect()
+                    })
+                    .unwrap_or_default()
+            } else { vec![] };
+
+        let patrol_lines: Vec<(egui::Pos2, egui::Pos2)> = patrol_nodes.windows(2)
+            .map(|w| (w[0].0.center(), w[1].0.center()))
+            .collect();
+
         // 4. egui overlay: toolbar + right panel + central paint input.
         let camera = engine.camera;
         let input  = engine.egui_input.clone();
@@ -640,6 +474,12 @@ impl GameContext for EditorContext {
                     ui.separator();
                     ui.label(format!("Map: {}", self.map_path));
                     ui.separator();
+                    if is_patrol_painting {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(100, 220, 100),
+                            format!("Patrol: {} — left-click to add waypoint, right-click to remove, Enter to finish", patrol_unit_name),
+                        );
+                    } else {
                     match active_tab {
                         RightPanelTab::TexturePalette => {
                             match self.selected_id {
@@ -659,13 +499,14 @@ impl GameContext for EditorContext {
                             match selected_spawner_id.and_then(|id| {
                                 self.spawner_units.iter().find(|u| u.id == id)
                             }) {
-                                Some(u) => { ui.label(format!("Brush: {}", u.name)); }
+                                Some(u) => { ui.label(format!("Brush: {} — left-click placed unit to edit patrol", u.name)); }
                                 None    => { ui.colored_label(
                                     egui::Color32::from_rgb(220, 180, 60),
                                     "No unit selected — pick one from the panel",
                                 ); }
                             }
                         }
+                    }
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // Panel toggle button — rightmost item.
@@ -677,8 +518,8 @@ impl GameContext for EditorContext {
                 });
             });
 
-            // ── Right panel with tabs (conditionally shown) ──
-            if panel_open {
+            // ── Right panel with tabs (conditionally shown, never during patrol painting) ──
+            if panel_open && !is_patrol_painting {
                 egui::SidePanel::right("right_panel")
                     .min_width(180.0)
                     .show(ctx, |ui| {
@@ -866,14 +707,38 @@ impl GameContext for EditorContext {
                     painter.rect_filled(*tile_rect, 0.0, *color);
                 }
 
-                // Paint input: held for texture/physics, single press for spawner.
-                let (primary_down, primary_pressed, secondary_pressed, pointer_pos) =
-                    ctx.input(|i| (i.pointer.primary_down(), i.pointer.primary_pressed(), i.pointer.secondary_pressed(), i.pointer.hover_pos()));
+                // Patrol waypoint nodes + connecting lines.
+                for (a, b) in &patrol_lines {
+                    painter.line_segment(
+                        [*a, *b],
+                        egui::Stroke::new(2.0, egui::Color32::from_rgba_unmultiplied(100, 220, 100, 200)),
+                    );
+                }
+                for &(node_rect, idx) in &patrol_nodes {
+                    painter.rect_filled(node_rect, 4.0, egui::Color32::from_rgba_unmultiplied(80, 210, 80, 140));
+                    painter.text(
+                        node_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        idx.to_string(),
+                        egui::FontId::proportional(13.0),
+                        egui::Color32::WHITE,
+                    );
+                }
+
+                // Paint input: held for texture/physics, single press for spawner/patrol.
+                let (primary_down, primary_pressed, secondary_pressed, pointer_pos, esc) =
+                    ctx.input(|i| (i.pointer.primary_down(), i.pointer.primary_pressed(), i.pointer.secondary_pressed(), i.pointer.hover_pos(), i.key_pressed(egui::Key::Enter)));
+                if esc { patrol_esc = true; }
                 if let Some(pos) = pointer_pos {
                     if rect.contains(pos) {
-                        if primary_down       { paint_pos = Some(pos); }
-                        if primary_pressed    { click_pos = Some(pos); }
-                        if secondary_pressed  { erase_pos = Some(pos); }
+                        if is_patrol_painting {
+                            if primary_pressed   { patrol_click_pos = Some(pos); }
+                            if secondary_pressed { patrol_erase_pos = Some(pos); }
+                        } else {
+                            if primary_down      { paint_pos = Some(pos); }
+                            if primary_pressed   { click_pos = Some(pos); }
+                            if secondary_pressed { erase_pos = Some(pos); }
+                        }
                     }
                 }
                 ui.allocate_rect(rect, egui::Sense::click_and_drag());
@@ -908,14 +773,19 @@ impl GameContext for EditorContext {
         if let Some(pos) = click_pos {
             if let Some(idx) = self.screen_to_tile_idx(pos.x, pos.y, h, camera) {
                 if active_tab == RightPanelTab::CharacterSpawner {
-                    // TODO: stacking — multiple units can occupy the same tile.
-                    //       Revisit to add overwrite/erase behaviour.
-                    if let Some(sel_id) = self.selected_spawner_id {
+                    let tile_pos = self.world.tiles[idx].position;
+                    if let Some((unit_id, instance_idx)) = self.find_unit_at_tile(tile_pos) {
+                        // Click on a placed unit → enter patrol painting for that instance.
+                        self.patrol_panel_was_open = self.right_panel_open;
+                        self.right_panel_open = false;
+                        self.spawner_mode = SpawnerMode::PatrolPainting { unit_id, instance_idx };
+                    } else if let Some(sel_id) = self.selected_spawner_id {
+                        // Empty tile + brush selected → place a new instance.
                         let tile = &self.world.tiles[idx];
                         if !tile.physics.solid {
-                            let tile_pos = tile.position;
                             if let Some(record) = self.spawner_units.iter_mut().find(|u| u.id == sel_id) {
                                 record.positions.push(tile_pos);
+                                record.patrols.push(vec![]);
                             }
                             self.save_units();
                         }
@@ -933,6 +803,46 @@ impl GameContext for EditorContext {
                         if let Some(record) = self.spawner_units.iter_mut().find(|u| u.id == sel_id) {
                             if let Some(i) = record.positions.iter().rposition(|&p| p == tile_pos) {
                                 record.positions.remove(i);
+                                if i < record.patrols.len() { record.patrols.remove(i); }
+                                self.save_units();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Patrol painting handlers ──────────────────────────────────────────
+        if patrol_esc {
+            if is_patrol_painting {
+                self.right_panel_open = self.patrol_panel_was_open;
+                self.spawner_mode = SpawnerMode::Idle;
+            }
+        }
+
+        if let Some(pos) = patrol_click_pos {
+            if let SpawnerMode::PatrolPainting { unit_id, instance_idx } = self.spawner_mode {
+                if let Some(idx) = self.screen_to_tile_idx(pos.x, pos.y, h, camera) {
+                    let tile_pos = self.world.tiles[idx].position;
+                    if let Some(record) = self.spawner_units.iter_mut().find(|u| u.id == unit_id) {
+                        while record.patrols.len() <= instance_idx {
+                            record.patrols.push(vec![]);
+                        }
+                        record.patrols[instance_idx].push(tile_pos);
+                        self.save_units();
+                    }
+                }
+            }
+        }
+
+        if let Some(pos) = patrol_erase_pos {
+            if let SpawnerMode::PatrolPainting { unit_id, instance_idx } = self.spawner_mode {
+                if let Some(idx) = self.screen_to_tile_idx(pos.x, pos.y, h, camera) {
+                    let tile_pos = self.world.tiles[idx].position;
+                    if let Some(record) = self.spawner_units.iter_mut().find(|u| u.id == unit_id) {
+                        if let Some(patrol) = record.patrols.get_mut(instance_idx) {
+                            if let Some(i) = patrol.iter().position(|&p| p == tile_pos) {
+                                patrol.remove(i);
                                 self.save_units();
                             }
                         }
@@ -945,6 +855,12 @@ impl GameContext for EditorContext {
             self.spawner_units.retain(|u| u.id != del_id);
             if self.selected_spawner_id == Some(del_id) {
                 self.selected_spawner_id = None;
+            }
+            if let SpawnerMode::PatrolPainting { unit_id, .. } = self.spawner_mode {
+                if unit_id == del_id {
+                    self.right_panel_open = self.patrol_panel_was_open;
+                    self.spawner_mode = SpawnerMode::Idle;
+                }
             }
             self.save_units();
         }
@@ -1038,6 +954,7 @@ impl GameContext for EditorContext {
                         name:      self.spawner_draft.name.clone(),
                         sprite_id: self.spawner_draft.sprite_id,
                         positions: vec![],
+                        patrols:   vec![],
                     });
                 }
                 SpawnerMode::Editing { index } => {
@@ -1045,6 +962,7 @@ impl GameContext for EditorContext {
                     self.spawner_units[index].sprite_id = self.spawner_draft.sprite_id;
                 }
                 SpawnerMode::Idle => {}
+                SpawnerMode::PatrolPainting { .. } => {}
             }
             self.save_units();
             self.spawner_mode  = SpawnerMode::Idle;
