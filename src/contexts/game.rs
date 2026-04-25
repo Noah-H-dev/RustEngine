@@ -23,13 +23,13 @@ impl GameRunningContext {
     }
 
     /// Resume an already-loaded game — skips the world/unit reload.
-    pub fn resume(map_path: &str, id_path: &str) -> Self {
+    pub fn resume(map_path: &str, id_path: &str, real_time: bool) -> Self {
         GameRunningContext {
             map_path:       map_path.to_string(),
             id_path:        id_path.to_string(),
             loaded:         true,
             wants_settings: false,
-            real_time:      false,
+            real_time,
         }
     }
 }
@@ -43,7 +43,7 @@ impl GameContext for GameRunningContext {
         }
         if self.wants_settings {
             self.wants_settings = false;
-            return Some(Box::new(SettingsContext::from_game(&self.map_path, &self.id_path)));
+            return Some(Box::new(SettingsContext::from_game(&self.map_path, &self.id_path, self.real_time)));
         }
         let player_moved = matches!(engine.current_action, actions::MOVE { .. });
 

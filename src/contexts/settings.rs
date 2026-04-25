@@ -44,6 +44,7 @@ pub struct SettingsContext {
     active_tab:  SettingsTab,
     pending:     Option<Box<dyn GameContext>>,
     do_quit:     bool,
+    real_time:   bool,
 }
 
 impl SettingsContext {
@@ -53,10 +54,11 @@ impl SettingsContext {
             active_tab:  SettingsTab::Game,
             pending:     None,
             do_quit:     false,
+            real_time:   false,
         }
     }
 
-    pub fn from_game(map_path: &str, id_path: &str) -> Self {
+    pub fn from_game(map_path: &str, id_path: &str, real_time: bool) -> Self {
         SettingsContext {
             return_dest: ReturnDest::Game {
                 map_path: map_path.to_string(),
@@ -65,6 +67,7 @@ impl SettingsContext {
             active_tab: SettingsTab::Game,
             pending:    None,
             do_quit:    false,
+            real_time,
         }
     }
 }
@@ -83,6 +86,7 @@ impl GameContext for SettingsContext {
         let mut do_main_menu = false;
         let mut do_quit      = false;
         let mut new_tab: Option<SettingsTab> = None;
+        let mut new_real_time: Option<bool> = None;
 
         let (w, h) = engine.screen_size();
         let input  = engine.egui_input.clone();
@@ -96,6 +100,7 @@ impl GameContext for SettingsContext {
         }
 
         let active_tab = self.active_tab;
+        let real_time  = self.real_time;
         engine.renderer.render(input, w, h, |ctx| {
             egui::CentralPanel::default()
                 .frame(egui::Frame::none().fill(
@@ -121,7 +126,12 @@ impl GameContext for SettingsContext {
                     // ── Tab content ───────────────────────────────────────────
                     // Add settings widgets for the active tab here (see file header).
                     match active_tab {
-                        SettingsTab::Game  => {}
+                        SettingsTab::Game  => {
+                            let mut rt = real_time;
+                            if ui.checkbox(&mut rt, "Realtime mode").changed() {
+                                new_real_time = Some(rt);
+                            }
+                        }
                         SettingsTab::Video => {}
                         SettingsTab::Audio => {}
                     }
@@ -145,14 +155,15 @@ impl GameContext for SettingsContext {
                 });
         });
 
-        if let Some(tab) = new_tab { self.active_tab = tab; }
+        if let Some(tab) = new_tab       { self.active_tab = tab; }
+        if let Some(rt)  = new_real_time { self.real_time   = rt;  }
 
         if do_return {
             self.pending = Some(match &self.return_dest {
                 ReturnDest::MainMenu => Box::new(MainMenuContext::new()),
                 ReturnDest::Game { map_path, id_path } => {
                     let (m, i) = (map_path.clone(), id_path.clone());
-                    Box::new(GameRunningContext::resume(&m, &i))
+                    Box::new(GameRunningContext::resume(&m, &i, self.real_time))
                 }
             });
         }
