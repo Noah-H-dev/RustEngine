@@ -1,14 +1,13 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use crate::ai_logic::Unit;
-use crate::stats::stats;
+use super::ai_logic::Unit;
+use super::stats::stats;
 use crate::tools::*;
 use crate::gui::EguiRenderer;
 use crate::shaders::{FRAG_SHADER, VERT_SHADER};
 use serde::{Deserialize, Serialize};
 
 pub const TILE_SIZE: i32 = 32;
-
 /// Persisted unit template, written to / read from units.toml.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct UnitRecord {
@@ -25,7 +24,32 @@ pub struct UnitRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats: Option<stats>,
 }
-
+impl UnitRecord {
+    /// Drop placed instances (and their patrols) whose position falls outside
+    /// the given map bounds, then trim surviving patrols the same way.
+    /// Returns true if anything was removed.
+    pub fn clamp_to_bounds(&mut self, width: usize, height: usize) -> bool {
+        let in_bounds = |x: i32, y: i32| x >= 0 && y >= 0 && (x as usize) < width && (y as usize) < height;
+        let mut changed = false;
+        let mut i = 0;
+        while i < self.positions.len() {
+            let (px, py) = self.positions[i];
+            if !in_bounds(px, py) {
+                self.positions.remove(i);
+                if i < self.patrols.len() { self.patrols.remove(i); }
+                changed = true;
+            } else {
+                i += 1;
+            }
+        }
+        for patrol in &mut self.patrols {
+            let before = patrol.len();
+            patrol.retain(|&(wx, wy)| in_bounds(wx, wy));
+            if patrol.len() != before { changed = true; }
+        }
+        return changed
+    }
+}
 /// Top-level TOML wrapper — produces `[[unit]]` array-of-tables syntax.
 #[derive(Serialize, Deserialize, Default)]
 pub struct UnitFile {
@@ -41,7 +65,9 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { real_time: false }
+        Settings {
+            real_time: false
+        }
     }
 }
 

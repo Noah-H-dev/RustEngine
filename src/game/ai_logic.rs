@@ -1,8 +1,8 @@
 use crate::tools::*;
-use crate::game_engine::World;
+use super::game_engine::World;
 use std::collections::{BinaryHeap, HashMap};
 use std::cmp::Reverse;
-use crate::stats::stats;
+use super::stats::stats;
 
 pub struct properties{
 
@@ -25,7 +25,7 @@ impl Unit {
         return Unit {position,target_position,size: 1.0, patrol: vec!(),patrol_idx:0, path: vec!(), stats:stats::new(1,1.0),action_time: 0.0, sprite}
     }
     pub fn draw(&self, camera: (i32, i32)){
-        use crate::game_engine::TILE_SIZE;
+        use super::game_engine::TILE_SIZE;
         self.sprite.draw(
             self.position.0 * TILE_SIZE - camera.0,
             self.position.1 * TILE_SIZE - camera.1,

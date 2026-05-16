@@ -3,7 +3,9 @@
     "allow": [
       "Bash(xargs grep:*)",
       "Bash(cargo check:*)",
-      "Bash(cargo build *)"
+      "Bash(cargo build *)",
+      "Bash(grep -E \"^\\(error|warning: unused|src\\\\\\\\\\\\\\\\contexts\\\\\\\\\\\\\\\\editor\\)\")",
+      "Bash(git mv *)"
     ]
   }
 }

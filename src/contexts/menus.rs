@@ -1,4 +1,4 @@
-use RustEngine::game_engine::{Engine, GameContext, TILE_SIZE};
+use RustEngine::game::game_engine::{Engine, GameContext, TILE_SIZE};
 
 use super::editor::EditorContext;
 use super::game::GameRunningContext;

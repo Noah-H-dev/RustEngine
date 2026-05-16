@@ -1,9 +1,6 @@
 
 pub mod gui;
-
-pub mod game_engine;
-mod ai_logic;
-pub mod stats;
+pub mod game;
 
 pub mod include {
     pub use stb_image::image::{self, LoadResult};

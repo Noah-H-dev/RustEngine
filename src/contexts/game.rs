@@ -1,4 +1,4 @@
-use RustEngine::game_engine::{Engine, GameContext, World};
+use RustEngine::game::game_engine::{Engine, GameContext, World};
 use RustEngine::tools::actions;
 use super::settings::SettingsContext;
 

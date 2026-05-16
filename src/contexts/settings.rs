@@ -1,34 +1,35 @@
 // ── How to extend this settings menu ─────────────────────────────────────────
 //
-// ADDING A NEW SETTING VALUE
-//   1. Add the field to `Settings` in game_engine.rs (e.g. `pub volume: f32`).
-//   2. In draw(), add `let mut volume = engine.settings.volume;` before the closure.
-//   3. Call `add_setting(ui, "Volume", SettingValue::Number(&mut volume));`
-//      inside the relevant tab arm.
-//   4. After the closure, add `engine.settings.volume = volume;`.
-//   Settings are saved automatically when the user presses Return or Exit to Main Menu.
+// ADDING A NEW SETTING — two places to touch:
+//   1. Add the field to `Settings` in game_engine.rs (e.g. `pub volume: f64`).
+//   2. Add one line to `settings_for_tab` under the right tab:
+//        SettingsTab::Audio => vec![
+//            ("Volume", Number(&mut s.volume)),
+//        ],
+//   Settings save automatically when the user picks Return or Exit to Main Menu.
 //
 // ADDING A NEW TAB
 //   1. Add a variant to `SettingsTab`.
 //   2. Add a `selectable_label` for it in the tab bar inside `draw`.
-//   3. Add a match arm in the settings content block.
+//   3. Add a match arm in `settings_for_tab` (start with `vec![]`).
+//
+// ADDING A NEW WIDGET TYPE (slider, dropdown, …)
+//   Extend `SettingValue` with the new variant and `add_setting` with its match arm.
 // ─────────────────────────────────────────────────────────────────────────────
 
-use RustEngine::game_engine::{Engine, GameContext};
+use RustEngine::game::game_engine::{Engine, GameContext, Settings};
 
 use super::menus::MainMenuContext;
 use super::game::GameRunningContext;
 
-// ── Setting widget helper ──────────────────────────────────────────────────────
-// TODO: Dropdown support will likely be needed in the future.
+// ── Setting widgets ──────────────────────────────────────────────────────────
+
 enum SettingValue<'a> {
     Checkbox(&'a mut bool),
     Number(&'a mut f64),
 }
 
-// Renders one labeled setting row and adds consistent spacing below it.
-// Settings stack top-to-bottom automatically because egui's vertical layout
-// places each call beneath the previous one.
+/// Renders one labeled setting row and adds consistent spacing below it.
 fn add_setting(ui: &mut egui::Ui, name: &str, value: SettingValue<'_>) {
     match value {
         SettingValue::Checkbox(b) => { ui.checkbox(b, name); }
@@ -42,8 +43,36 @@ fn add_setting(ui: &mut egui::Ui, name: &str, value: SettingValue<'_>) {
     ui.add_space(4.0);
 }
 
+
+
+
+/// Single source of truth for what settings exist and which tab they live on.
+/// Each entry hands the UI a `&mut` directly into `Settings`, so edits land in
+/// engine state with no mirror/write-back dance.
+fn settings_for_tab<'a>(tab: SettingsTab, s: &'a mut Settings) -> Vec<(&'static str, SettingValue<'a>)> {
+    use SettingValue::*;
+    match tab {
+        SettingsTab::Game  => vec![
+            ("Realtime mode", Checkbox(&mut s.real_time)),
+        ],
+        SettingsTab::Video => vec![],
+        SettingsTab::Audio => vec![],
+    }
+}
+
+
+
+
+
+
+
+// ── Context ──────────────────────────────────────────────────────────────────
+
 #[derive(Clone, Copy, PartialEq)]
 enum SettingsTab { Game, Video, Audio }
+
+#[derive(Clone, Copy)]
+enum SettingsAction { Return, MainMenu, Quit }
 
 enum ReturnDest {
     MainMenu,
@@ -59,23 +88,32 @@ pub struct SettingsContext {
 
 impl SettingsContext {
     pub fn from_menu() -> Self {
-        SettingsContext {
-            return_dest: ReturnDest::MainMenu,
-            active_tab:  SettingsTab::Game,
-            pending:     None,
-            do_quit:     false,
-        }
+        Self::new(ReturnDest::MainMenu)
     }
 
     pub fn from_game(map_path: &str, id_path: &str) -> Self {
+        Self::new(ReturnDest::Game {
+            map_path: map_path.to_string(),
+            id_path:  id_path.to_string(),
+        })
+    }
+
+    fn new(return_dest: ReturnDest) -> Self {
         SettingsContext {
-            return_dest: ReturnDest::Game {
-                map_path: map_path.to_string(),
-                id_path:  id_path.to_string(),
-            },
+            return_dest,
             active_tab: SettingsTab::Game,
             pending:    None,
             do_quit:    false,
+        }
+    }
+
+    /// The context to swap to when the user clicks Return.
+    fn return_context(&self) -> Box<dyn GameContext> {
+        match &self.return_dest {
+            ReturnDest::MainMenu => Box::new(MainMenuContext::new()),
+            ReturnDest::Game { map_path, id_path } => {
+                Box::new(GameRunningContext::resume(map_path, id_path))
+            }
         }
     }
 }
@@ -90,16 +128,8 @@ impl GameContext for SettingsContext {
     }
 
     fn draw(&mut self, engine: &mut Engine) {
-        let mut do_return    = false;
-        let mut do_main_menu = false;
-        let mut do_quit      = false;
-        let mut new_tab: Option<SettingsTab> = None;
-
-        // Setting mirrors: copy from engine.settings before the closure, write back after.
-        let mut rt = engine.settings.real_time;
-
-        let (w, h) = engine.screen_size();
-        let input  = engine.egui_input.clone();
+        let mut action:  Option<SettingsAction> = None;
+        let mut new_tab: Option<SettingsTab>    = None;
 
         // Render the game world behind the overlay when entered from in-game.
         if matches!(self.return_dest, ReturnDest::Game { .. }) {
@@ -110,6 +140,14 @@ impl GameContext for SettingsContext {
         }
 
         let active_tab = self.active_tab;
+        let (w, h)     = engine.screen_size();
+        let input      = engine.egui_input.clone();
+        // Hand the closure a reborrowable &mut into settings — disjoint from
+        // engine.renderer, so the closure can mutate settings in place with
+        // no mirror/write-back. Re-listed each pass since egui may invoke
+        // the UI closure multiple times per frame for layout convergence.
+        let settings   = &mut engine.settings;
+
         engine.renderer.render(input, w, h, |ctx| {
             // ── Tab bar pinned to the top ─────────────────────────────────────
             egui::TopBottomPanel::top("settings_tabs").show(ctx, |ui| {
@@ -130,11 +168,11 @@ impl GameContext for SettingsContext {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     ui.add_space(96.0);
-                    if ui.button("Return").clicked()            { do_return    = true; }
+                    if ui.button("Return").clicked()            { action = Some(SettingsAction::Return);   }
                     ui.add_space(8.0);
-                    if ui.button("Exit to Main Menu").clicked() { do_main_menu = true; }
+                    if ui.button("Exit to Main Menu").clicked() { action = Some(SettingsAction::MainMenu); }
                     ui.add_space(8.0);
-                    if ui.button("Quit").clicked()              { do_quit      = true; }
+                    if ui.button("Quit").clicked()              { action = Some(SettingsAction::Quit);     }
                 });
                 ui.add_space(8.0);
             });
@@ -145,12 +183,8 @@ impl GameContext for SettingsContext {
                 ui.horizontal(|ui| {
                     ui.add_space(96.0);
                     ui.vertical(|ui| {
-                        match active_tab {
-                            SettingsTab::Game  => {
-                                add_setting(ui, "Realtime mode", SettingValue::Checkbox(&mut rt));
-                            }
-                            SettingsTab::Video => {}
-                            SettingsTab::Audio => {}
+                        for (label, val) in settings_for_tab(active_tab, settings) {
+                            add_setting(ui, label, val);
                         }
                     });
                 });
@@ -158,24 +192,11 @@ impl GameContext for SettingsContext {
         });
 
         if let Some(tab) = new_tab { self.active_tab = tab; }
-        engine.settings.real_time = rt;
-
-        if do_return {
-            engine.settings.save();
-            self.pending = Some(match &self.return_dest {
-                ReturnDest::MainMenu => Box::new(MainMenuContext::new()),
-                ReturnDest::Game { map_path, id_path } => {
-                    let (m, i) = (map_path.clone(), id_path.clone());
-                    Box::new(GameRunningContext::resume(&m, &i))
-                }
-            });
-        }
-        if do_main_menu {
-            engine.settings.save();
-            self.pending = Some(Box::new(MainMenuContext::new()));
-        }
-        if do_quit {
-            self.do_quit = true;
+        match action {
+            Some(SettingsAction::Return)   => { engine.settings.save(); self.pending = Some(self.return_context()); }
+            Some(SettingsAction::MainMenu) => { engine.settings.save(); self.pending = Some(Box::new(MainMenuContext::new())); }
+            Some(SettingsAction::Quit)     => { self.do_quit = true; }
+            None => {}
         }
     }
 }
