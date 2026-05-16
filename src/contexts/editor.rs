@@ -53,6 +53,7 @@
 // ══════════════════════════════════════════════════════════════════════════════
 
 use RustEngine::game_engine::{Engine, GameContext, World, TILE_SIZE, UnitRecord, UnitFile};
+use RustEngine::stats::stats;
 use RustEngine::tools::{load_textures, GLObject, BL_RECTANGLE};
 use RustEngine::shaders::{VERT_SHADER, FRAG_SHADER};
 use std::collections::HashMap;
@@ -104,12 +105,13 @@ enum SpawnerMode {
 struct UnitDraft {
     name: String,
     sprite_id: Option<i32>,
-    // Future fields: stats: UnitStats, feats: Vec<String>
+    health: i64,
+    speed: f64,
 }
 
 impl UnitDraft {
     fn new() -> Self {
-        UnitDraft { name: String::new(), sprite_id: None }
+        UnitDraft { name: String::new(), sprite_id: None, health: 1, speed: 1.0 }
     }
 }
 
@@ -137,6 +139,9 @@ pub struct EditorContext {
     unit_sprite_cache: HashMap<i32, GLObject>,
     /// Panel state saved when entering patrol painting mode, restored on exit.
     patrol_panel_was_open: bool,
+    /// Some((draft_w, draft_h)) while the resize dialog is open.
+    resize_dialog: Option<(usize, usize)>,
+    zoom: f32,
 }
 
 impl EditorContext {
@@ -168,6 +173,8 @@ impl EditorContext {
             selected_spawner_id: None,
             unit_sprite_cache,
             patrol_panel_was_open: true,
+            resize_dialog: None,
+            zoom: 1.0,
         })
     }
 
@@ -196,6 +203,8 @@ impl EditorContext {
             selected_spawner_id: None,
             unit_sprite_cache,
             patrol_panel_was_open: true,
+            resize_dialog: None,
+            zoom: 1.0,
         })
     }
 
@@ -292,10 +301,11 @@ impl EditorContext {
     /// Convert a screen-space position (egui coords, y=0 at top) to a
     /// tile index into `self.world.tiles`, accounting for the engine camera.
     /// World coords are snapped down to the nearest TILE_SIZE multiple first.
-    fn screen_to_tile_idx(&self, sx: f32, sy: f32, screen_h: u32, camera: (i32, i32)) -> Option<usize> {
+    fn screen_to_tile_idx(&self, sx: f32, sy: f32, screen_h: u32, camera: (i32, i32), zoom: f32) -> Option<usize> {
         // OpenGL y=0 is bottom; egui y=0 is top — flip y.
-        let world_x = sx as i32 + camera.0;
-        let world_y = (screen_h as i32 - sy as i32) + camera.1;
+        // Divide by zoom to convert screen pixels back to world pixels before adding camera offset.
+        let world_x = (sx / zoom) as i32 + camera.0;
+        let world_y = ((screen_h as f32 - sy) / zoom) as i32 + camera.1;
         if world_x < 0 || world_y < 0 { return None; }
         // Snap to tile grid (floor to nearest TILE_SIZE multiple).
         let tx = (world_x / TILE_SIZE) as usize;
@@ -353,6 +363,12 @@ impl GameContext for EditorContext {
         let mut patrol_click_pos:  Option<egui::Pos2> = None;
         let mut patrol_erase_pos:  Option<egui::Pos2> = None;
         let mut patrol_esc         = false;
+        let mut open_resize_dialog = false;
+        let mut confirm_resize:    Option<(usize, usize)> = None;
+        let mut close_resize_dialog = false;
+        let mut cam_scroll_y:  f32                 = 0.0;
+        let mut cam_pan_delta: Option<egui::Vec2>  = None;
+        let mut cam_cursor:    Option<egui::Pos2>  = None;
 
         // 1. On the first frame, place the camera so the map starts at the bottom-left.
         let (w, h) = engine.screen_size();
@@ -362,18 +378,17 @@ impl GameContext for EditorContext {
         }
 
         // 2. Draw the OpenGL world first so the egui overlay appears on top.
-        self.world.draw(engine.camera);
+        self.world.draw(engine.camera, self.zoom);
 
         // Draw placed unit sprites at their tile positions.
+        let z = self.zoom;
         for record in &self.spawner_units {
             if let Some(sprite_id) = record.sprite_id {
                 if let Some(gl_obj) = self.unit_sprite_cache.get(&sprite_id) {
                     for &(tx, ty) in &record.positions {
-                        gl_obj.draw(
-                            tx * TILE_SIZE - engine.camera.0,
-                            ty * TILE_SIZE - engine.camera.1,
-                            TILE_SIZE as f32,
-                        );
+                        let sx = ((tx * TILE_SIZE - engine.camera.0) as f32 * z) as i32;
+                        let sy = ((ty * TILE_SIZE - engine.camera.1) as f32 * z) as i32;
+                        gl_obj.draw(sx, sy, TILE_SIZE as f32 * z);
                     }
                 }
             }
@@ -401,29 +416,35 @@ impl GameContext for EditorContext {
         let selected_spawner_id = self.selected_spawner_id;
         let mut draft_name     = self.spawner_draft.name.clone();
         let draft_sprite       = self.spawner_draft.sprite_id;
-        let ts            = TILE_SIZE as f32;
-        let cam_x         = engine.camera.0 as f32;
-        let cam_y         = engine.camera.1 as f32;
-        let sh            = h as f32;
-        let map_w         = self.world.width  as f32 * ts;
-        let map_h         = self.world.height as f32 * ts;
+        let mut draft_health   = self.spawner_draft.health;
+        let mut draft_speed    = self.spawner_draft.speed;
+        let ts    = TILE_SIZE as f32;
+        let z     = self.zoom;
+        let tsz   = ts * z;  // tile size in screen pixels at current zoom
+        let cam_x = engine.camera.0 as f32;
+        let cam_y = engine.camera.1 as f32;
+        let sh    = h as f32;
+        let map_w = self.world.width  as f32 * ts;
+        let map_h = self.world.height as f32 * ts;
+
+        // tile_rect converts a tile's (tx, ty) grid coord to an egui Rect in screen space.
+        let tile_rect = |tx: f32, ty: f32| -> egui::Rect {
+            let x0 = (tx * ts - cam_x) * z;
+            let y0 = sh - ((ty + 1.0) * ts - cam_y) * z;
+            egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x0 + tsz, y0 + tsz))
+        };
 
         let physics_overlay: Vec<(egui::Rect, egui::Color32)> =
             if active_tab == RightPanelTab::PhysicsPainter || active_tab == RightPanelTab::CharacterSpawner {
                 self.world.tiles.iter().filter_map(|tile| {
-                    let tx = tile.position.0 as f32;
-                    let ty = tile.position.1 as f32;
-                    let x0 = tx * ts - cam_x;
-                    let y0 = sh - (ty + 1.0) * ts + cam_y;
-                    let x1 = x0 + ts;
-                    let y1 = y0 + ts;
-                    if x1 < 0.0 || x0 > w as f32 || y1 < 0.0 || y0 > sh { return None; }
+                    let r = tile_rect(tile.position.0 as f32, tile.position.1 as f32);
+                    if r.max.x < 0.0 || r.min.x > w as f32 || r.max.y < 0.0 || r.min.y > sh { return None; }
                     let color = if tile.physics.solid {
                         egui::Color32::from_rgba_unmultiplied(220, 60, 60, 140)
                     } else {
                         egui::Color32::from_rgba_unmultiplied(255, 255, 255, 50)
                     };
-                    Some((egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1)), color))
+                    Some((r, color))
                 }).collect()
             } else {
                 vec![]
@@ -432,10 +453,8 @@ impl GameContext for EditorContext {
         // Unit position markers — always visible regardless of active tab.
         let unit_overlay: Vec<(egui::Rect, egui::Color32)> = self.spawner_units.iter()
             .flat_map(|record| record.positions.iter().map(|&(tx, ty)| {
-                let x0 = tx as f32 * ts - cam_x;
-                let y0 = sh - (ty as f32 + 1.0) * ts + cam_y;
                 (
-                    egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x0 + ts, y0 + ts)),
+                    tile_rect(tx as f32, ty as f32),
                     egui::Color32::from_rgba_unmultiplied(60, 200, 180, 160),
                 )
             }))
@@ -449,9 +468,7 @@ impl GameContext for EditorContext {
                     .and_then(|r| r.patrols.get(instance_idx))
                     .map(|patrol| {
                         patrol.iter().enumerate().map(|(i, &(tx, ty))| {
-                            let x0 = tx as f32 * ts - cam_x;
-                            let y0 = sh - (ty as f32 + 1.0) * ts + cam_y;
-                            (egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x0 + ts, y0 + ts)), i)
+                            (tile_rect(tx as f32, ty as f32), i)
                         }).collect()
                     })
                     .unwrap_or_default()
@@ -461,6 +478,10 @@ impl GameContext for EditorContext {
             .map(|w| (w[0].0.center(), w[1].0.center()))
             .collect();
 
+        let resize_open = self.resize_dialog.is_some();
+        let mut resize_draft_w = self.resize_dialog.map(|(w, _)| w).unwrap_or(self.world.width);
+        let mut resize_draft_h = self.resize_dialog.map(|(_, h)| h).unwrap_or(self.world.height);
+
         // 4. egui overlay: toolbar + right panel + central paint input.
         let camera = engine.camera;
         let input  = engine.egui_input.clone();
@@ -469,6 +490,8 @@ impl GameContext for EditorContext {
             egui::TopBottomPanel::top("editor_toolbar").show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     if ui.button("Save").clicked() { do_save = true; }
+                    ui.separator();
+                    if ui.button("Resize").clicked() { open_resize_dialog = true; }
                     ui.separator();
                     if ui.button("Exit").clicked() { do_exit = true; }
                     ui.separator();
@@ -499,10 +522,10 @@ impl GameContext for EditorContext {
                             match selected_spawner_id.and_then(|id| {
                                 self.spawner_units.iter().find(|u| u.id == id)
                             }) {
-                                Some(u) => { ui.label(format!("Brush: {} — left-click placed unit to edit patrol", u.name)); }
+                                Some(u) => { ui.label(format!("Brush: {} — left-click to place / edit patrol, right-click to delete", u.name)); }
                                 None    => { ui.colored_label(
                                     egui::Color32::from_rgb(220, 180, 60),
-                                    "No unit selected — pick one from the panel",
+                                    "No unit selected — pick one from the panel (right-click to delete any placed unit)",
                                 ); }
                             }
                         }
@@ -642,7 +665,16 @@ impl GameContext for EditorContext {
                                             }
                                         });
                                     ui.add_space(6.0);
-                                    ui.collapsing("Stats", |ui| { ui.label("(not yet implemented)"); });
+                                    ui.collapsing("Stats", |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label("Health:");
+                                            ui.add(egui::DragValue::new(&mut draft_health).range(0..=i64::MAX));
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.label("Speed:");
+                                            ui.add(egui::DragValue::new(&mut draft_speed).range(0.0..=f64::MAX).speed(0.1));
+                                        });
+                                    });
                                     ui.add_space(2.0);
                                     ui.collapsing("Feats", |ui| { ui.label("(not yet implemented)"); });
                                     ui.add_space(8.0);
@@ -657,6 +689,33 @@ impl GameContext for EditorContext {
                     });
             }
 
+            // ── Resize dialog ──
+            if resize_open {
+                egui::Window::new("Resize Map")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                    .show(ctx, |ui| {
+                        egui::Grid::new("resize_grid").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
+                            ui.label("Width:");
+                            ui.add(egui::DragValue::new(&mut resize_draft_w).range(1..=512));
+                            ui.end_row();
+                            ui.label("Height:");
+                            ui.add(egui::DragValue::new(&mut resize_draft_h).range(1..=512));
+                            ui.end_row();
+                        });
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Confirm").clicked() {
+                                confirm_resize = Some((resize_draft_w, resize_draft_h));
+                            }
+                            if ui.button("Cancel").clicked() {
+                                close_resize_dialog = true;
+                            }
+                        });
+                    });
+            }
+
             // ── Central panel: gridlines + map border + physics overlay + paint input ──
             egui::CentralPanel::default()
                 .frame(egui::Frame::none())
@@ -668,18 +727,18 @@ impl GameContext for EditorContext {
                 let grid_stroke = egui::Stroke::new(1.0,
                     egui::Color32::from_rgba_unmultiplied(255, 255, 255, 30));
                 let first_tx = (cam_x / ts).floor() as i32;
-                let last_tx  = ((cam_x + rect.width())  / ts).ceil() as i32 + 1;
+                let last_tx  = ((cam_x + rect.width()  / z) / ts).ceil() as i32 + 1;
                 for tx in first_tx..=last_tx {
-                    let sx = tx as f32 * ts - cam_x;
+                    let sx = (tx as f32 * ts - cam_x) * z;
                     painter.line_segment(
                         [egui::pos2(sx, rect.top()), egui::pos2(sx, rect.bottom())],
                         grid_stroke,
                     );
                 }
                 let first_ty = (cam_y / ts).floor() as i32;
-                let last_ty  = ((cam_y + rect.height()) / ts).ceil() as i32 + 1;
+                let last_ty  = ((cam_y + rect.height() / z) / ts).ceil() as i32 + 1;
                 for ty in first_ty..=last_ty {
-                    let sy = sh - ty as f32 * ts + cam_y;
+                    let sy = sh - (ty as f32 * ts - cam_y) * z;
                     painter.line_segment(
                         [egui::pos2(rect.left(), sy), egui::pos2(rect.right(), sy)],
                         grid_stroke,
@@ -688,8 +747,8 @@ impl GameContext for EditorContext {
 
                 // Map border outline.
                 let border_rect = egui::Rect::from_min_max(
-                    egui::pos2(-cam_x,          sh - map_h + cam_y),
-                    egui::pos2(map_w - cam_x,   sh         + cam_y),
+                    egui::pos2(-cam_x * z,              sh - (map_h - cam_y) * z),
+                    egui::pos2((map_w - cam_x) * z,     sh + cam_y * z),
                 );
                 painter.rect_stroke(
                     border_rect, 0.0,
@@ -726,9 +785,19 @@ impl GameContext for EditorContext {
                 }
 
                 // Paint input: held for texture/physics, single press for spawner/patrol.
-                let (primary_down, primary_pressed, secondary_pressed, pointer_pos, esc) =
-                    ctx.input(|i| (i.pointer.primary_down(), i.pointer.primary_pressed(), i.pointer.secondary_pressed(), i.pointer.hover_pos(), i.key_pressed(egui::Key::Enter)));
+                let (primary_down, primary_pressed, secondary_pressed, pointer_pos, esc,
+                     scroll_y, mid_down, mid_delta) =
+                    ctx.input(|i| (
+                        i.pointer.primary_down(), i.pointer.primary_pressed(),
+                        i.pointer.secondary_pressed(), i.pointer.hover_pos(),
+                        i.key_pressed(egui::Key::Enter),
+                        i.raw_scroll_delta.y,
+                        i.pointer.middle_down(),
+                        i.pointer.delta(),
+                    ));
                 if esc { patrol_esc = true; }
+                if scroll_y != 0.0 { cam_scroll_y = scroll_y; cam_cursor = pointer_pos; }
+                if mid_down && mid_delta != egui::Vec2::ZERO { cam_pan_delta = Some(mid_delta); }
                 if let Some(pos) = pointer_pos {
                     if rect.contains(pos) {
                         if is_patrol_painting {
@@ -752,7 +821,7 @@ impl GameContext for EditorContext {
         if let Some(id)    = new_selected      { self.selected_id = Some(id); }
 
         if let Some(pos) = paint_pos {
-            if let Some(idx) = self.screen_to_tile_idx(pos.x, pos.y, h, camera) {
+            if let Some(idx) = self.screen_to_tile_idx(pos.x, pos.y, h, camera, self.zoom) {
                 match active_tab {
                     RightPanelTab::TexturePalette => {
                         if let Some(sel_id) = self.selected_id {
@@ -771,7 +840,7 @@ impl GameContext for EditorContext {
         }
 
         if let Some(pos) = click_pos {
-            if let Some(idx) = self.screen_to_tile_idx(pos.x, pos.y, h, camera) {
+            if let Some(idx) = self.screen_to_tile_idx(pos.x, pos.y, h, camera, self.zoom) {
                 if active_tab == RightPanelTab::CharacterSpawner {
                     let tile_pos = self.world.tiles[idx].position;
                     if let Some((unit_id, instance_idx)) = self.find_unit_at_tile(tile_pos) {
@@ -795,17 +864,14 @@ impl GameContext for EditorContext {
         }
 
         if let Some(pos) = erase_pos {
-            if let Some(idx) = self.screen_to_tile_idx(pos.x, pos.y, h, camera) {
+            if let Some(idx) = self.screen_to_tile_idx(pos.x, pos.y, h, camera, self.zoom) {
                 if active_tab == RightPanelTab::CharacterSpawner {
                     let tile_pos = self.world.tiles[idx].position;
-                    if let Some(sel_id) = self.selected_spawner_id {
-                        // Remove the most recent instance of the selected template at this tile.
-                        if let Some(record) = self.spawner_units.iter_mut().find(|u| u.id == sel_id) {
-                            if let Some(i) = record.positions.iter().rposition(|&p| p == tile_pos) {
-                                record.positions.remove(i);
-                                if i < record.patrols.len() { record.patrols.remove(i); }
-                                self.save_units();
-                            }
+                    if let Some((unit_id, instance_idx)) = self.find_unit_at_tile(tile_pos) {
+                        if let Some(record) = self.spawner_units.iter_mut().find(|u| u.id == unit_id) {
+                            record.positions.remove(instance_idx);
+                            if instance_idx < record.patrols.len() { record.patrols.remove(instance_idx); }
+                            self.save_units();
                         }
                     }
                 }
@@ -822,7 +888,7 @@ impl GameContext for EditorContext {
 
         if let Some(pos) = patrol_click_pos {
             if let SpawnerMode::PatrolPainting { unit_id, instance_idx } = self.spawner_mode {
-                if let Some(idx) = self.screen_to_tile_idx(pos.x, pos.y, h, camera) {
+                if let Some(idx) = self.screen_to_tile_idx(pos.x, pos.y, h, camera, self.zoom) {
                     let tile_pos = self.world.tiles[idx].position;
                     if let Some(record) = self.spawner_units.iter_mut().find(|u| u.id == unit_id) {
                         while record.patrols.len() <= instance_idx {
@@ -837,7 +903,7 @@ impl GameContext for EditorContext {
 
         if let Some(pos) = patrol_erase_pos {
             if let SpawnerMode::PatrolPainting { unit_id, instance_idx } = self.spawner_mode {
-                if let Some(idx) = self.screen_to_tile_idx(pos.x, pos.y, h, camera) {
+                if let Some(idx) = self.screen_to_tile_idx(pos.x, pos.y, h, camera, self.zoom) {
                     let tile_pos = self.world.tiles[idx].position;
                     if let Some(record) = self.spawner_units.iter_mut().find(|u| u.id == unit_id) {
                         if let Some(patrol) = record.patrols.get_mut(instance_idx) {
@@ -926,16 +992,24 @@ impl GameContext for EditorContext {
 
         // Write back draft edits made inside the closure.
         if spawner_form_open {
-            self.spawner_draft.name = draft_name;
+            self.spawner_draft.name   = draft_name;
+            self.spawner_draft.health = draft_health;
+            self.spawner_draft.speed  = draft_speed;
             if let Some(s) = new_draft_sprite { self.spawner_draft.sprite_id = Some(s); }
         }
         if let Some(id) = new_selected_spawner { self.selected_spawner_id = Some(id); }
         if let Some(idx) = open_edit {
-            self.spawner_mode  = SpawnerMode::Editing { index: idx };
+            let record = &self.spawner_units[idx];
+            let (h, s) = record.stats.as_ref()
+                .map(|st| (st.health, st.speed))
+                .unwrap_or((1, 1.0));
             self.spawner_draft = UnitDraft {
-                name:      self.spawner_units[idx].name.clone(),
-                sprite_id: self.spawner_units[idx].sprite_id,
+                name:      record.name.clone(),
+                sprite_id: record.sprite_id,
+                health:    h,
+                speed:     s,
             };
+            self.spawner_mode = SpawnerMode::Editing { index: idx };
         }
         if open_create {
             self.spawner_mode  = SpawnerMode::CreatingNew;
@@ -955,11 +1029,13 @@ impl GameContext for EditorContext {
                         sprite_id: self.spawner_draft.sprite_id,
                         positions: vec![],
                         patrols:   vec![],
+                        stats:     Some(stats::new(self.spawner_draft.health, self.spawner_draft.speed)),
                     });
                 }
                 SpawnerMode::Editing { index } => {
                     self.spawner_units[index].name      = self.spawner_draft.name.clone();
                     self.spawner_units[index].sprite_id = self.spawner_draft.sprite_id;
+                    self.spawner_units[index].stats     = Some(stats::new(self.spawner_draft.health, self.spawner_draft.speed));
                 }
                 SpawnerMode::Idle => {}
                 SpawnerMode::PatrolPainting { .. } => {}
@@ -967,6 +1043,60 @@ impl GameContext for EditorContext {
             self.save_units();
             self.spawner_mode  = SpawnerMode::Idle;
             self.spawner_draft = UnitDraft::new();
+        }
+
+        // Resize dialog
+        if open_resize_dialog { self.resize_dialog = Some((self.world.width, self.world.height)); }
+        if close_resize_dialog { self.resize_dialog = None; }
+        if let Some((nw, nh)) = confirm_resize {
+            self.world.resize(nw, nh);
+            let in_bounds = |x: i32, y: i32| x >= 0 && y >= 0 && (x as usize) < nw && (y as usize) < nh;
+            let mut units_changed = false;
+            for record in &mut self.spawner_units {
+                // Cull spawned instances whose positions fall outside the new bounds.
+                let before = record.positions.len();
+                let mut i = 0;
+                while i < record.positions.len() {
+                    let (px, py) = record.positions[i];
+                    if !in_bounds(px, py) {
+                        record.positions.remove(i);
+                        if i < record.patrols.len() { record.patrols.remove(i); }
+                    } else {
+                        i += 1;
+                    }
+                }
+                // Cull patrol waypoints within surviving instances that now fall outside bounds.
+                for patrol in &mut record.patrols {
+                    let pre = patrol.len();
+                    patrol.retain(|&(wx, wy)| in_bounds(wx, wy));
+                    if patrol.len() != pre { units_changed = true; }
+                }
+                if record.positions.len() != before { units_changed = true; }
+            }
+            if units_changed { self.save_units(); }
+            self.world.save(&self.map_path);
+            self.resize_dialog = None;
+        }
+        // Write back draft values while dialog is open.
+        if let Some(ref mut d) = self.resize_dialog { *d = (resize_draft_w, resize_draft_h); }
+
+        // Pan (middle-mouse drag): delta is in screen pixels, divide by zoom to get world pixels.
+        if let Some(delta) = cam_pan_delta {
+            engine.camera.0 -= (delta.x / self.zoom) as i32;
+            engine.camera.1 += (delta.y / self.zoom) as i32;
+        }
+
+        // Zoom (scroll wheel): zoom toward the cursor position.
+        if cam_scroll_y != 0.0 {
+            let old_z = self.zoom;
+            self.zoom = (self.zoom * 1.1_f32.powf(cam_scroll_y / 50.0)).clamp(0.125, 8.0);
+            let new_z = self.zoom;
+            if let Some(cur) = cam_cursor {
+                let cx = cur.x;
+                let cy = h as f32 - cur.y;
+                engine.camera.0 += (cx * (1.0 / old_z - 1.0 / new_z)) as i32;
+                engine.camera.1 += (cy * (1.0 / old_z - 1.0 / new_z)) as i32;
+            }
         }
 
         if do_save { self.world.save(&self.map_path); }

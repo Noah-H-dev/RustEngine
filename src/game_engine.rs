@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use crate::ai_logic::Unit;
+use crate::stats::stats;
 use crate::tools::*;
 use crate::gui::EguiRenderer;
 use crate::shaders::{FRAG_SHADER, VERT_SHADER};
@@ -21,6 +22,8 @@ pub struct UnitRecord {
     /// `patrols[i]` is the ordered waypoint list for the unit at `positions[i]`.
     #[serde(default)]
     pub patrols: Vec<Vec<(i32, i32)>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats: Option<stats>,
 }
 
 /// Top-level TOML wrapper — produces `[[unit]]` array-of-tables syntax.
@@ -28,6 +31,33 @@ pub struct UnitRecord {
 pub struct UnitFile {
     #[serde(default)]
     pub unit: Vec<UnitRecord>,
+}
+
+/// Persisted game settings, written to / read from settings.toml.
+#[derive(Serialize, Deserialize)]
+pub struct Settings {
+    pub real_time: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings { real_time: false }
+    }
+}
+
+impl Settings {
+    pub fn load() -> Self {
+        if !std::path::Path::new("settings.toml").exists() {
+            return Self::default();
+        }
+        let content = std::fs::read_to_string("settings.toml").unwrap_or_default();
+        toml::from_str(&content).unwrap_or_default()
+    }
+
+    pub fn save(&self) {
+        let content = toml::to_string(self).expect("Failed to serialize settings");
+        std::fs::write("settings.toml", content).expect("Failed to save settings.toml");
+    }
 }
 
 // ── Context trait ──────────────────────────────────────────────────────────────
@@ -58,6 +88,7 @@ pub struct Engine {
     /// World-space offset of the bottom-left corner of the screen.
     /// (0, 0) means the world origin is at the bottom-left of the screen.
     pub camera: (i32, i32),
+    pub settings: Settings,
 }
 
 impl Engine {
@@ -72,7 +103,7 @@ impl Engine {
         });
         win.set_swap_interval(GlSwapInterval::Vsync).unwrap();
         clear_color(0.2, 0.3, 0.3, 1.0);
-        Engine {
+        let mut engine = Engine {
             win,
             sdl,
             renderer: EguiRenderer::new(gl),
@@ -84,13 +115,16 @@ impl Engine {
             units: Vec::new(),
             world: World::new_empty(0, 0),
             camera: (0, 0),
-        }
+            settings: Settings::load(),
+        };
+        engine.player.stats.speed = 2.0 ;
+        return engine;
     }
 
     /// Drives the context state machine until the window is closed.
     pub fn run(&mut self, mut context: Box<dyn GameContext>) {
-        const TICK_RATE: Duration = Duration::from_millis(16);
-        const DT: f32 = TICK_RATE.as_secs_f32();
+        let mut TICK_RATE: Duration = Duration::from_millis(16);
+        let mut DT: f32 = TICK_RATE.as_secs_f32();
         let mut accumulator = Duration::ZERO;
         let mut last = Instant::now();
 
@@ -156,6 +190,9 @@ impl Engine {
                         );
                         let mut unit = Unit::new(position, position, sprite);
                         unit.patrol = record.patrols.get(i).cloned().unwrap_or_default();
+                        if let Some(s) = &record.stats {
+                            unit.stats = s.clone();
+                        }
                         unit_vec.push(unit);
                     }
                 }
@@ -211,16 +248,14 @@ impl Tile {
     }
 
     /// Skips drawing if this is an empty tile (id == 0).
-    pub fn draw(&self, camera: (i32, i32)) {
+    pub fn draw(&self, camera: (i32, i32), zoom: f32) {
         if self.tile_id == 0 {
             return;
         }
         if let Some(sprite) = &self.sprite {
-            sprite.draw(
-                self.position.0 * self.size - camera.0,
-                self.position.1 * self.size - camera.1,
-                self.size as f32,
-            );
+            let sx = ((self.position.0 * self.size - camera.0) as f32 * zoom) as i32;
+            let sy = ((self.position.1 * self.size - camera.1) as f32 * zoom) as i32;
+            sprite.draw(sx, sy, self.size as f32 * zoom);
         }
     }
 }
@@ -278,10 +313,30 @@ impl World {
         World { tiles, width, height }
     }
 
-    pub fn draw(&self, camera: (i32, i32)) {
+    pub fn draw(&self, camera: (i32, i32), zoom: f32) {
         for tile in &self.tiles {
-            tile.draw(camera);
+            tile.draw(camera, zoom);
         }
+    }
+
+    /// Resize the world, preserving tiles that fit in the new bounds.
+    /// Tiles outside the new bounds are dropped; new cells start empty.
+    pub fn resize(&mut self, new_width: usize, new_height: usize) {
+        let old_tiles: Vec<Tile> = std::mem::take(&mut self.tiles);
+        let mut by_pos: std::collections::HashMap<(i32, i32), Tile> =
+            old_tiles.into_iter().map(|t| (t.position, t)).collect();
+        let mut new_tiles = Vec::with_capacity(new_width * new_height);
+        for y in 0..new_height {
+            for x in 0..new_width {
+                let pos = (x as i32, y as i32);
+                new_tiles.push(by_pos.remove(&pos).unwrap_or_else(|| {
+                    Tile::new(0, TILE_SIZE, pos, None, PhysicsComponent::default())
+                }));
+            }
+        }
+        self.tiles  = new_tiles;
+        self.width  = new_width;
+        self.height = new_height;
     }
 
     /// Write the map back to disk in the same space-separated format that load_map reads.

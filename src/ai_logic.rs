@@ -2,6 +2,7 @@ use crate::tools::*;
 use crate::game_engine::World;
 use std::collections::{BinaryHeap, HashMap};
 use std::cmp::Reverse;
+use crate::stats::stats;
 
 pub struct properties{
 
@@ -14,12 +15,14 @@ pub struct Unit {
     pub patrol_idx: i32,
     pub path: Vec<(i32, i32)>,
     pub size: f32,
+    pub stats: stats,
+    pub action_time:f64,
     sprite: GLObject,
 
 }
 impl Unit {
     pub fn new(position: (i32,i32),target_position: (i32,i32), sprite:GLObject) -> Unit {
-        return Unit {position,target_position,size: 1.0, patrol: vec!(),patrol_idx:0, path: vec!(), sprite}
+        return Unit {position,target_position,size: 1.0, patrol: vec!(),patrol_idx:0, path: vec!(), stats:stats::new(1,1.0),action_time: 0.0, sprite}
     }
     pub fn draw(&self, camera: (i32, i32)){
         use crate::game_engine::TILE_SIZE;
@@ -31,19 +34,33 @@ impl Unit {
     }
     pub fn update(&mut self, world: &World){
         let mut current_move = (0,0);
-        if self.path.len() > 0{
-            current_move = self.path.pop().unwrap();
-            self.position.0 += current_move.0;
-            self.position.1 += current_move.1;
-        }
-        else if self.patrol.len() > 0{
-            self.target_position =  self.patrol[self.patrol_idx as usize];
-            self.update_path(world);
-            self.patrol_idx += 1;
-            if self.patrol_idx == (self.patrol.len()) as i32{
-                self.patrol_idx = 0;
+        self.action_time += self.stats.speed;
+        while self.action_time > 1.0 {
+            if self.path.len() > 0 {
+                current_move = self.path.pop().unwrap();
+                self.position.0 += current_move.0;
+                self.position.1 += current_move.1;
+            } else if self.patrol.len() > 0 {
+                self.target_position = self.patrol[self.patrol_idx as usize];
+                self.update_path(world);
+                self.patrol_idx += 1;
+                if self.patrol_idx == (self.patrol.len()) as i32 {
+                    self.patrol_idx = 0;
+                }
             }
+            self.action_time -= 1.0;
         }
+    }
+
+    /// Consumes one step from the pre-computed path and subtracts 1.0 from action_time.
+    /// Hitting a wall (empty path) does not consume action_time.
+    pub fn player_update(&mut self) {
+        if let Some(step) = self.path.pop() {
+            self.position.0 += step.0;
+            self.position.1 += step.1;
+            self.action_time -= 1.0;
+        }
+        self.target_position = self.position;
     }
 
     /// Runs A* from self.position to self.target_position using World tile solidity.
