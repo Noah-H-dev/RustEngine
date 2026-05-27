@@ -3,6 +3,7 @@ use RustEngine::game::game_engine::{Engine, GameContext, TILE_SIZE};
 use super::editor::EditorContext;
 use super::game::GameRunningContext;
 use super::settings::SettingsContext;
+use super::tileset_editor::TilesetEditorContext;
 
 // ── Game sub-menu state (owned by MainMenuContext) ─────────────────────────────
 enum GameSub {
@@ -70,6 +71,7 @@ impl GameContext for MainMenuContext {
         let mut confirm_open = false;
         let mut confirm_new  = false;
         let mut go_settings  = false;
+        let mut go_tileset   = false;
 
         let (w, h) = engine.screen_size();
         let input = engine.egui_input.clone();
@@ -186,6 +188,12 @@ impl GameContext for MainMenuContext {
                         EditorSub::Hidden => {}
                     }
 
+                    // ── Tileset editor ──
+                    ui.add_space(8.0);
+                    if ui.add_sized([160.0, 40.0], egui::Button::new("Tileset")).clicked() {
+                        go_tileset = true;
+                    }
+
                     // ── Settings ──
                     ui.add_space(8.0);
                     if ui.add_sized([160.0, 40.0], egui::Button::new("Settings")).clicked() {
@@ -263,6 +271,11 @@ impl GameContext for MainMenuContext {
 
         if go_settings {
             self.pending_transition = Some(Box::new(SettingsContext::from_menu()));
+        }
+
+        if go_tileset {
+            self.error_msg = None;
+            self.pending_transition = Some(Box::new(TilesetEditorContext::new()));
         }
 
         if confirm_new {

@@ -55,7 +55,9 @@ fn settings_for_tab<'a>(tab: SettingsTab, s: &'a mut Settings) -> Vec<(&'static 
         SettingsTab::Game  => vec![
             ("Realtime mode", Checkbox(&mut s.real_time)),
         ],
-        SettingsTab::Video => vec![],
+        SettingsTab::Video => vec![
+            ("Per-monitor DPI v2 (restart to apply)", Checkbox(&mut s.dpi_per_monitor)),
+        ],
         SettingsTab::Audio => vec![],
     }
 }

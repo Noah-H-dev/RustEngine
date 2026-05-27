@@ -1,0 +1,9 @@
+[[texture]]
+id = 1
+name = "wall"
+solid = true
+
+[[texture]]
+id = 2
+name = "floor"
+solid = false

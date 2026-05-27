@@ -39,6 +39,7 @@ impl GameContext for GameRunningContext {
         if !self.loaded {
             engine.world = World::load(&self.map_path, &self.id_path);
             engine.units = Engine::load_units(&self.id_path);
+            //here we edit the player position
             self.loaded = true;
         }
         if self.wants_settings {

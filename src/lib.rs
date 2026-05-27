@@ -297,6 +297,61 @@ pub mod tools {
     }
 
 
+    /// Resolve `SetProcessDpiAwarenessContext` at runtime and call it. Returns
+    /// whether the call was actually made. We look it up via `GetProcAddress`
+    /// rather than a static import on purpose: on Windows versions without the
+    /// API (< Win10 1703) the lookup simply returns null and we no-op, so the
+    /// process starts and runs exactly as if this code had never been attempted.
+    /// A static `#[link]` import of a missing symbol would instead abort startup.
+    #[cfg(windows)]
+    fn try_set_process_dpi(per_monitor: bool) -> bool {
+        use core::ffi::{c_char, c_void};
+        // kernel32 always exports these on every supported Windows, so a static
+        // import here is safe.
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn LoadLibraryA(name: *const c_char) -> *mut c_void;
+            fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
+        }
+        // DPI_AWARENESS_CONTEXT sentinel handles (not real pointers).
+        const PER_MONITOR_AWARE_V2: isize = -4;
+        const SYSTEM_AWARE: isize = -2;
+        type SetCtxFn = unsafe extern "system" fn(*mut c_void) -> i32;
+
+        unsafe {
+            let user32 = LoadLibraryA(c"user32.dll".as_ptr());
+            if user32.is_null() { return false; }
+            let proc = GetProcAddress(user32, c"SetProcessDpiAwarenessContext".as_ptr());
+            if proc.is_null() { return false; } // API absent on this Windows → run unchanged
+            let set_ctx: SetCtxFn = core::mem::transmute(proc);
+            let ctx = if per_monitor { PER_MONITOR_AWARE_V2 } else { SYSTEM_AWARE };
+            set_ctx(ctx as *mut c_void);
+            true
+        }
+    }
+
+    /// Choose the process DPI-awareness mode. Must be called BEFORE `init_sdl`
+    /// and before any window exists — awareness can only be set once per process.
+    ///
+    /// `per_monitor` true → per-monitor-v2 (window renders at each monitor's
+    /// native resolution, no OS bitmap-stretching → crisp pixel font); false →
+    /// "system" (the prior default). Two mechanisms, both driven by this one
+    /// flag:
+    ///   1. A direct `SetProcessDpiAwarenessContext` call, resolved at runtime
+    ///      so a missing API just no-ops (see `try_set_process_dpi`).
+    ///   2. The `SDL_WINDOWS_DPI_AWARENESS` hint as a fallback / to keep SDL
+    ///      from fighting it.
+    /// No-op effect on non-Windows (the Win32 call is compiled out; SDL ignores
+    /// the hint there).
+    pub fn set_dpi_awareness(per_monitor: bool) {
+        // SDL hint fallback. SAFE: called once at startup before any threads spawn.
+        let hint = if per_monitor { "permonitorv2" } else { "system" };
+        unsafe { std::env::set_var("SDL_WINDOWS_DPI_AWARENESS", hint); }
+
+        #[cfg(windows)]
+        let _ = try_set_process_dpi(per_monitor);
+    }
+
     pub fn init_sdl() -> Sdl {
         let sdl = Sdl::init(InitFlags::EVERYTHING);
         sdl.set_gl_context_major_version(3).unwrap();
@@ -836,9 +891,9 @@ pub mod tools {
         }
 
     }
-    impl Drop for shader{
-        fn drop(&mut self){
-            unsafe{
+    impl Drop for shader {
+        fn drop(&mut self) {
+            unsafe {
                 glDeleteProgram(self.shader_id);
             }
         }

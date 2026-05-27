@@ -63,8 +63,8 @@ use RustEngine::game::stats::stats;
 use RustEngine::tools::{load_textures, GLObject, BL_RECTANGLE};
 use RustEngine::shaders::{VERT_SHADER, FRAG_SHADER};
 use std::collections::HashMap;
-
 use super::menus::MainMenuContext;
+use super::tiledefs::TileDefs;
 
 // ── Editor ─────────────────────────────────────────────────────────────────────
 
@@ -93,6 +93,64 @@ fn tile_display_name(id: i32, path: &str) -> String {
     format!("{} | {}", id, path)
 }
 
+/// Render one texture row in the palette: a selectable `id | name` label, with a
+/// `...` menu on the far right holding the collision dropdown, the move-to-folder
+/// submenu, and Delete. Emits intents only — never mutates editor state directly.
+fn texture_row(
+    ui: &mut egui::Ui,
+    entry: &PaletteEntry,
+    selected: bool,
+    solid: bool,
+    current_folder: Option<&str>,
+    folders: &[String],
+    intent: &mut EditorIntent,
+) {
+    ui.horizontal(|ui| {
+        if ui.selectable_label(selected, entry.display()).clicked() {
+            intent.new_selected = Some(entry.id);
+        }
+        // Push the overflow menu to the far right of the row.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.menu_button("...", |ui| {
+                ui.menu_button("Default collision", |ui| {
+                    if ui.selectable_label(solid, "Solid").clicked() {
+                        intent.set_texture_solid = Some((entry.id, true));
+                        ui.close();
+                    }
+                    if ui.selectable_label(!solid, "Passable").clicked() {
+                        intent.set_texture_solid = Some((entry.id, false));
+                        ui.close();
+                    }
+                });
+                ui.separator();
+                ui.menu_button("Move to folder", |ui| {
+                    if current_folder.is_some() && ui.button("(remove from folder)").clicked() {
+                        intent.move_to_folder = Some((entry.id, None));
+                        ui.close();
+                    }
+                    for f in folders {
+                        if current_folder == Some(f.as_str()) { continue; }
+                        if ui.button(f).clicked() {
+                            intent.move_to_folder = Some((entry.id, Some(f.clone())));
+                            ui.close();
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("New folder...").clicked() {
+                        intent.start_new_folder = Some(entry.id);
+                        ui.close();
+                    }
+                });
+                ui.separator();
+                if ui.button("Delete").clicked() {
+                    intent.delete_texture_id = Some(entry.id);
+                    ui.close();
+                }
+            });
+        });
+    });
+}
+
 // ── Texture-creation FSM ─────────────────────────────────────────────────────
 // State lives in EditorContext::tex_new_state; actions are emitted by the UI
 // and applied in handle_tex.
@@ -105,6 +163,18 @@ enum TexNewState {
 
 #[derive(Clone, Copy)]
 enum TexAction { PickFile, Overwrite, StartRename, ConfirmRename, Cancel }
+
+// ── Folder-naming FSM ────────────────────────────────────────────────────────
+// Inline text input shown at the top of the Textures panel, used both to name a
+// brand-new folder (while moving a texture into it) and to rename an existing
+// folder. State lives in EditorContext::folder_edit; applied in handle_folders.
+enum FolderEdit {
+    Idle,
+    /// Typing a name for a new folder; the texture moves into it on confirm.
+    NamingNew { texture_id: i32, name: String },
+    /// Renaming an existing folder; all member textures are reassigned on confirm.
+    Renaming  { from: String, to: String },
+}
 
 // ── Spawner FSM ──────────────────────────────────────────────────────────────
 // State lives in EditorContext::spawner_mode; form actions are emitted by the
@@ -151,6 +221,8 @@ struct EditorIntent {
     paint_pos: Option<egui::Pos2>,
     click_pos: Option<egui::Pos2>,
     erase_pos: Option<egui::Pos2>,
+    // Held right-mouse erase on the texture tab.
+    erase_paint_pos: Option<egui::Pos2>,
     // Patrol-painting input
     patrol_click_pos: Option<egui::Pos2>,
     patrol_erase_pos: Option<egui::Pos2>,
@@ -163,6 +235,15 @@ struct EditorIntent {
     // Texture panel
     tex_action:        Option<TexAction>,
     delete_texture_id: Option<i32>,
+    // Set a texture's default collision: (texture id, solid).
+    set_texture_solid: Option<(i32, bool)>,
+    // Folder management
+    move_to_folder:      Option<(i32, Option<String>)>, // move texture to folder (None = loose)
+    start_new_folder:    Option<i32>,                   // open new-folder input for this texture
+    start_rename_folder: Option<String>,                // open rename input for this folder
+    delete_folder:       Option<String>,                // dissolve folder, members become loose
+    folder_confirm:      bool,                           // confirm the active folder input
+    folder_cancel:       bool,                           // cancel the active folder input
     // Resize dialog
     open_resize_dialog:  bool,
     confirm_resize:      Option<(usize, usize)>,
@@ -198,6 +279,10 @@ pub struct EditorContext {
     /// Some((draft_w, draft_h)) while the resize dialog is open.
     resize_dialog: Option<(usize, usize)>,
     zoom: f32,
+    /// Shared tile definitions (collision default, folder, name, future options).
+    tile_defs: TileDefs,
+    /// Inline folder-name input state (new folder / rename folder).
+    folder_edit: FolderEdit,
 }
 
 impl EditorContext {
@@ -242,6 +327,8 @@ impl EditorContext {
             unit_sprite_cache,
             resize_dialog: None,
             zoom: 1.0,
+            tile_defs: TileDefs::load(),
+            folder_edit: FolderEdit::Idle,
         }
     }
 
@@ -399,19 +486,35 @@ impl EditorContext {
 
     /// Held-mouse painting on the texture / physics tabs. No-op on the spawner tab.
     fn handle_paint(&mut self, active_tab: RightPanelTab, intent: &EditorIntent, screen_h: u32, camera: (i32, i32)) {
-        let Some(pos) = intent.paint_pos else { return; };
-        self.at_tile(pos, screen_h, camera, |this, idx, _tp| match active_tab {
-            RightPanelTab::TexturePalette => {
-                if let Some(sel_id) = this.selected_id {
-                    let tex = if sel_id == 0 { None } else { this.texture_for_id(sel_id).map(str::to_owned) };
-                    this.world.tiles[idx].set_sprite(sel_id, tex.as_deref());
+        if let Some(pos) = intent.paint_pos {
+            self.at_tile(pos, screen_h, camera, |this, idx, _tp| match active_tab {
+                RightPanelTab::TexturePalette => {
+                    if let Some(sel_id) = this.selected_id {
+                        let tex = if sel_id == 0 { None } else { this.texture_for_id(sel_id).map(str::to_owned) };
+                        this.world.tiles[idx].set_sprite(sel_id, tex.as_deref());
+                        // Stamp this texture's default collision onto the tile.
+                        // The Physics tab can still override individual tiles afterward.
+                        // Eraser (id 0) leaves collision untouched.
+                        if sel_id != 0 {
+                            let solid = this.tile_defs.solid_of(sel_id);
+                            this.world.tiles[idx].physics.solid = solid;
+                        }
+                    }
                 }
+                RightPanelTab::PhysicsPainter => {
+                    this.world.tiles[idx].physics.solid = this.physics_brush_solid;
+                }
+                RightPanelTab::CharacterSpawner => {}
+            });
+        }
+        // Held right-mouse on the texture tab erases whatever tile the cursor is over.
+        if active_tab == RightPanelTab::TexturePalette {
+            if let Some(pos) = intent.erase_paint_pos {
+                self.at_tile(pos, screen_h, camera, |this, idx, _tp| {
+                    this.world.tiles[idx].set_sprite(0, None);
+                });
             }
-            RightPanelTab::PhysicsPainter => {
-                this.world.tiles[idx].physics.solid = this.physics_brush_solid;
-            }
-            RightPanelTab::CharacterSpawner => {}
-        });
+        }
     }
 
     /// Single click / right-click on the map while the spawner tab is active.
@@ -557,6 +660,7 @@ impl EditorContext {
             self.palette.retain(|e| e.id != id);
             if self.selected_id == Some(id) { self.selected_id = None; }
             self.save_palette();
+            if self.tile_defs.remove(id) { self.tile_defs.save(); }
             self.unit_sprite_cache = Self::build_sprite_cache(&self.palette);
         }
         let Some(action) = intent.tex_action else { return; };
@@ -593,6 +697,57 @@ impl EditorContext {
                 }
             }
             TexAction::Cancel => { self.tex_new_state = TexNewState::Idle; }
+        }
+    }
+
+    /// Apply folder intents: open/confirm/cancel the inline name input, move a
+    /// texture between folders, and rename or dissolve a folder. Folders are
+    /// implicit, so rename/delete operate by rewriting member tiles' folder.
+    fn handle_folders(&mut self, intent: &EditorIntent, folder_text: String) {
+        // Mirror the inline text input back into the FSM.
+        match &mut self.folder_edit {
+            FolderEdit::NamingNew { name, .. } => *name = folder_text,
+            FolderEdit::Renaming  { to, .. }   => *to   = folder_text,
+            FolderEdit::Idle => {}
+        }
+
+        if let Some(id) = intent.start_new_folder {
+            self.folder_edit = FolderEdit::NamingNew { texture_id: id, name: String::new() };
+        }
+        if let Some(from) = &intent.start_rename_folder {
+            self.folder_edit = FolderEdit::Renaming { from: from.clone(), to: from.clone() };
+        }
+        if let Some((id, target)) = &intent.move_to_folder {
+            self.tile_defs.set_folder(*id, target.clone());
+            self.tile_defs.save();
+        }
+        if let Some(folder) = &intent.delete_folder {
+            if self.tile_defs.clear_folder(folder) { self.tile_defs.save(); }
+            // Drop a rename input that was targeting the now-gone folder.
+            if matches!(&self.folder_edit, FolderEdit::Renaming { from, .. } if from == folder) {
+                self.folder_edit = FolderEdit::Idle;
+            }
+        }
+        if intent.folder_cancel {
+            self.folder_edit = FolderEdit::Idle;
+        }
+        if intent.folder_confirm {
+            match std::mem::replace(&mut self.folder_edit, FolderEdit::Idle) {
+                FolderEdit::NamingNew { texture_id, name } => {
+                    let name = name.trim().to_string();
+                    if !name.is_empty() {
+                        self.tile_defs.set_folder(texture_id, Some(name));
+                        self.tile_defs.save();
+                    }
+                }
+                FolderEdit::Renaming { from, to } => {
+                    let to = to.trim().to_string();
+                    if !to.is_empty() && to != from && self.tile_defs.rename_folder(&from, &to) {
+                        self.tile_defs.save();
+                    }
+                }
+                FolderEdit::Idle => {}
+            }
         }
     }
 
@@ -694,6 +849,14 @@ impl GameContext for EditorContext {
             TexNewState::Conflict { proposed_name, .. } => (proposed_name.clone(), proposed_name.clone()),
             TexNewState::Renaming { new_name, .. }      => (String::new(),          new_name.clone()),
             TexNewState::Idle                           => (String::new(),          String::new()),
+        };
+        // Folder-input snapshot: editable name + which mode (new vs rename) is active.
+        let folder_naming   = matches!(self.folder_edit, FolderEdit::NamingNew { .. });
+        let folder_renaming = matches!(self.folder_edit, FolderEdit::Renaming  { .. });
+        let mut folder_text = match &self.folder_edit {
+            FolderEdit::NamingNew { name, .. } => name.clone(),
+            FolderEdit::Renaming  { to, .. }   => to.clone(),
+            FolderEdit::Idle                   => String::new(),
         };
         let spawner_form_open  = matches!(self.spawner_mode, SpawnerMode::CreatingNew | SpawnerMode::Editing { .. });
         let spawner_is_editing = matches!(self.spawner_mode, SpawnerMode::Editing { .. });
@@ -845,24 +1008,74 @@ impl GameContext for EditorContext {
                                     ui.separator();
                                 }
 
-                                if ui.selectable_label(self.selected_id == Some(0), "0 | (eraser)").clicked() {
+                                // Inline folder-name input (creating a new folder or renaming one).
+                                if folder_naming || folder_renaming {
+                                    ui.label(if folder_naming { "New folder name:" } else { "Rename folder:" });
+                                    ui.text_edit_singleline(&mut folder_text);
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Confirm").clicked() { intent.folder_confirm = true; }
+                                        if ui.button("Cancel").clicked()  { intent.folder_cancel  = true; }
+                                    });
+                                    ui.separator();
+                                }
+
+                                if ui.button("+ New Texture").clicked() { intent.tex_action = Some(TexAction::PickFile); }
+                                ui.separator();
+                                if ui.selectable_label(self.selected_id == Some(0), "(eraser)").clicked() {
                                     intent.new_selected = Some(0);
                                 }
                                 ui.separator();
-                                if ui.button("+ New Texture").clicked() { intent.tex_action = Some(TexAction::PickFile); }
-                                ui.separator();
                                 egui::ScrollArea::vertical().show(ui, |ui| {
+                                    // Folders are implicit: the sorted set of folder names referenced
+                                    // by any tile in the current palette.
+                                    let folders: Vec<String> = {
+                                        let mut set = std::collections::BTreeSet::new();
+                                        for e in &self.palette {
+                                            if e.id == 0 { continue; }
+                                            if let Some(f) = self.tile_defs.folder_of(e.id) {
+                                                set.insert(f);
+                                            }
+                                        }
+                                        set.into_iter().collect()
+                                    };
+                                    let solid_of  = |id: i32| self.tile_defs.solid_of(id);
+                                    let folder_of = |id: i32| self.tile_defs.folder_of(id);
+
+                                    // Folders first — each a collapsible group with its own ... menu.
+                                    for folder in &folders {
+                                        let header_id = ui.make_persistent_id(("tex_folder", folder));
+                                        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), header_id, true)
+                                            .show_header(ui, |ui| {
+                                                ui.label(folder);
+                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                    ui.menu_button("...", |ui| {
+                                                        if ui.button("Rename").clicked() {
+                                                            intent.start_rename_folder = Some(folder.clone());
+                                                            ui.close();
+                                                        }
+                                                        if ui.button("Delete folder").clicked() {
+                                                            intent.delete_folder = Some(folder.clone());
+                                                            ui.close();
+                                                        }
+                                                    });
+                                                });
+                                            })
+                                            .body(|ui| {
+                                                for entry in &self.palette {
+                                                    if entry.id == 0 { continue; }
+                                                    if folder_of(entry.id).as_deref() != Some(folder.as_str()) { continue; }
+                                                    let selected = self.selected_id == Some(entry.id);
+                                                    texture_row(ui, entry, selected, solid_of(entry.id), Some(folder.as_str()), &folders, &mut intent);
+                                                }
+                                            });
+                                    }
+
+                                    // Loose textures (no folder) below the folders.
                                     for entry in &self.palette {
                                         if entry.id == 0 { continue; }
+                                        if folder_of(entry.id).is_some() { continue; }
                                         let selected = self.selected_id == Some(entry.id);
-                                        ui.horizontal(|ui| {
-                                            if ui.selectable_label(selected, entry.display()).clicked() {
-                                                intent.new_selected = Some(entry.id);
-                                            }
-                                            if ui.small_button("Del").clicked() {
-                                                intent.delete_texture_id = Some(entry.id);
-                                            }
-                                        });
+                                        texture_row(ui, entry, selected, solid_of(entry.id), None, &folders, &mut intent);
                                     }
                                 });
                             }
@@ -1048,11 +1261,11 @@ impl GameContext for EditorContext {
                 }
 
                 // Paint input: held for texture/physics, single press for spawner/patrol.
-                let (primary_down, primary_pressed, secondary_pressed, pointer_pos, esc,
+                let (primary_down, primary_pressed, secondary_pressed, secondary_down, pointer_pos, esc,
                      scroll_y, mid_down, mid_delta) =
                     ctx.input(|i| (
                         i.pointer.primary_down(), i.pointer.primary_pressed(),
-                        i.pointer.secondary_pressed(), i.pointer.hover_pos(),
+                        i.pointer.secondary_pressed(), i.pointer.secondary_down(), i.pointer.hover_pos(),
                         i.key_pressed(egui::Key::Enter),
                         i.raw_scroll_delta.y,
                         i.pointer.middle_down(),
@@ -1070,6 +1283,7 @@ impl GameContext for EditorContext {
                             if primary_down      { intent.paint_pos = Some(pos); }
                             if primary_pressed   { intent.click_pos = Some(pos); }
                             if secondary_pressed { intent.erase_pos = Some(pos); }
+                            if secondary_down    { intent.erase_paint_pos = Some(pos); }
                         }
                     }
                 }
@@ -1082,12 +1296,17 @@ impl GameContext for EditorContext {
         if let Some(tab)   = intent.new_tab     { self.active_tab          = tab;       }
         if let Some(brush) = intent.new_physics_brush { self.physics_brush_solid = brush; }
         if let Some(id)    = intent.new_selected      { self.selected_id   = Some(id);  }
+        if let Some((id, solid)) = intent.set_texture_solid {
+            self.tile_defs.set_solid(id, solid);
+            self.tile_defs.save();
+        }
 
         self.handle_paint(active_tab, &intent, h, camera);
         self.handle_unit_clicks(active_tab, &intent, h, camera);
         self.handle_patrol(&intent, h, camera);
         self.handle_spawner(&intent, draft_name, draft_health, draft_speed);
         self.handle_tex(&intent, rename_text);
+        self.handle_folders(&intent, folder_text);
         self.handle_resize(&intent, resize_draft_w, resize_draft_h);
         self.handle_camera(engine, &intent, h);
 

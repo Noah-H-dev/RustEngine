@@ -1,1 +1,2 @@
-real_time = false
+real_time = true
+dpi_per_monitor = true

@@ -60,13 +60,19 @@ pub struct UnitFile {
 /// Persisted game settings, written to / read from settings.toml.
 #[derive(Serialize, Deserialize)]
 pub struct Settings {
+    #[serde(default)]
     pub real_time: bool,
+    /// Request per-monitor-v2 DPI awareness on Windows. Read once at startup
+    /// (before SDL init) — changing it requires a restart to take effect.
+    #[serde(default)]
+    pub dpi_per_monitor: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            real_time: false
+            real_time: false,
+            dpi_per_monitor: false,
         }
     }
 }
@@ -119,6 +125,10 @@ pub struct Engine {
 
 impl Engine {
     pub fn new( title: &str) -> Self {
+        // Load settings before SDL init so DPI awareness can be applied (the
+        // hint is read when SDL's video subsystem comes up). Reused below.
+        let settings = Settings::load();
+        set_dpi_awareness(settings.dpi_per_monitor);
         let sdl = init_sdl();
         let win = init_window(title, &sdl);
         let gl = Arc::new(unsafe {
@@ -141,9 +151,9 @@ impl Engine {
             units: Vec::new(),
             world: World::new_empty(0, 0),
             camera: (0, 0),
-            settings: Settings::load(),
+            settings,
         };
-        engine.player.stats.speed = 2.0 ;
+        engine.player.stats.speed = 1.0 ;
         return engine;
     }
 

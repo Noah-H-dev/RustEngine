@@ -56,9 +56,30 @@ pub struct EguiRenderer {
 impl EguiRenderer {
     pub fn new(gl: Arc<egui_glow::glow::Context>) -> Self {
         let ctx = egui::Context::default();
+        Self::install_ui_font(&ctx);
         let painter = egui_glow::Painter::new(gl, "", None, false)
             .expect("Failed to create egui painter");
         Self { ctx, painter, buttons: Vec::new() }
+    }
+
+    /// Engine-wide UI typeface. Embeds the IBM VGA 9x16 (CP437) font from the
+    /// Int10h Oldschool PC font pack and makes it the default for both the
+    /// proportional and monospace families, so every context renders with it.
+    /// Changing the `include_bytes!` path here restyles all UI text at once.
+    fn install_ui_font(ctx: &egui::Context) {
+        const UI_FONT: &[u8] =
+            include_bytes!("../../fonts/ttf - Px (pixel outline)/Px437_IBM_VGA_9x16.ttf");
+
+        let mut fonts = egui::FontDefinitions::default();
+        fonts.font_data.insert(
+            "ui_font".to_owned(),
+            Arc::new(egui::FontData::from_static(UI_FONT)),
+        );
+        // Insert first in each family so it takes precedence over the defaults.
+        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            fonts.families.entry(family).or_default().insert(0, "ui_font".to_owned());
+        }
+        ctx.set_fonts(fonts);
     }
 
     pub fn add_button(&mut self, button: UiButton) {
