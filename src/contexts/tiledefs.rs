@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 /// On-disk path for tile definitions. Shared by the map editor and the tileset
 /// editor; both must use this same model so neither drops the other's fields.
-pub const TILEDEFS_PATH: &str = "textures.toml";
+pub const TILEDEFS_PATH: &str = "gamedata/textures.toml";
 
 /// One abstract tile definition. Properties here are shared across all tilesets.
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -71,6 +71,9 @@ impl TileDefs {
         tiles.sort_by_key(|t| t.id);
         let content = toml::to_string(&TileDefFile { tiles })
             .expect("Failed to serialize tile definitions");
+        if let Some(parent) = std::path::Path::new(TILEDEFS_PATH).parent() {
+            if !parent.as_os_str().is_empty() { let _ = std::fs::create_dir_all(parent); }
+        }
         std::fs::write(TILEDEFS_PATH, content).expect("Failed to save tile definitions");
     }
 

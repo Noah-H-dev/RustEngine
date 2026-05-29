@@ -1,10 +1,10 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use super::ai_logic::Unit;
+use super::entity::Unit;
 use super::stats::stats;
 use crate::tools::*;
 use crate::gui::EguiRenderer;
-use crate::shaders::{FRAG_SHADER, VERT_SHADER};
+use crate::shaders::{FRAG_SHADER, TRANS_FRAG_SHADER, VERT_SHADER};
 use serde::{Deserialize, Serialize};
 
 pub const TILE_SIZE: i32 = 32;
@@ -66,29 +66,38 @@ pub struct Settings {
     /// (before SDL init) — changing it requires a restart to take effect.
     #[serde(default)]
     pub dpi_per_monitor: bool,
+    /// Path of the active tileset. Used by the tileset editor (which tileset
+    /// is open for editing) AND by the game and map editor (which `id.txt`-
+    /// style file resolves tile ids -> PNGs). One global selection.
+    #[serde(default = "default_tileset")]
+    pub active_tileset: String,
 }
+
+fn default_tileset() -> String { "tilesets/Default.txt".to_string() }
 
 impl Default for Settings {
     fn default() -> Self {
         Settings {
             real_time: false,
             dpi_per_monitor: false,
+            active_tileset: default_tileset(),
         }
     }
 }
 
 impl Settings {
+    const PATH: &'static str = "gamedata/settings.toml";
+
     pub fn load() -> Self {
-        if !std::path::Path::new("settings.toml").exists() {
-            return Self::default();
-        }
-        let content = std::fs::read_to_string("settings.toml").unwrap_or_default();
+        if !std::path::Path::new(Self::PATH).exists() { return Self::default(); }
+        let content = std::fs::read_to_string(Self::PATH).unwrap_or_default();
         toml::from_str(&content).unwrap_or_default()
     }
 
     pub fn save(&self) {
         let content = toml::to_string(self).expect("Failed to serialize settings");
-        std::fs::write("settings.toml", content).expect("Failed to save settings.toml");
+        let _ = std::fs::create_dir_all("gamedata");
+        std::fs::write(Self::PATH, content).expect("Failed to save settings.toml");
     }
 }
 
@@ -138,12 +147,16 @@ impl Engine {
             })
         });
         win.set_swap_interval(GlSwapInterval::Vsync).unwrap();
-        clear_color(0.2, 0.3, 0.3, 1.0);
-        let mut engine = Engine {
+        clear_color(0.0, 0.0, 0.0, 1.0);
+        // Build the player from player.toml — resolves sprite_id via the active
+        // tileset. Game start later overrides position from the map's ---SPAWN---
+        // marker. Stats come straight from the file (no longer forced here).
+        let player = super::entity::load_player(&settings.active_tileset);
+        let engine = Engine {
             win,
             sdl,
             renderer: EguiRenderer::new(gl),
-            player: Unit::new((0,0),(0,0), GLObject::new(BL_RECTANGLE,"./assets/player.png",VERT_SHADER,FRAG_SHADER)),
+            player,
             win_open: true,
             current_action: actions::NONE,
             egui_input: egui::RawInput::default(),
@@ -153,7 +166,6 @@ impl Engine {
             camera: (0, 0),
             settings,
         };
-        engine.player.stats.speed = 1.0 ;
         return engine;
     }
 
@@ -207,8 +219,9 @@ impl Engine {
         );
     }
     pub fn load_units(id_path: &str) -> Vec<Unit> {
-        if !std::path::Path::new("units.toml").exists() { return Vec::new(); }
-        let content = std::fs::read_to_string("units.toml").unwrap_or_default();
+        const UNITS_PATH: &str = "gamedata/units.toml";
+        if !std::path::Path::new(UNITS_PATH).exists() { return Vec::new(); }
+        let content = std::fs::read_to_string(UNITS_PATH).unwrap_or_default();
         let records = toml::from_str::<UnitFile>(&content)
             .map(|f| f.unit)
             .unwrap_or_default();
@@ -301,6 +314,10 @@ pub struct World {
     pub tiles: Vec<Tile>,
     pub width: usize,
     pub height: usize,
+    /// Per-map player spawn (tile coords). `None` = no spawn placed yet.
+    /// Read from the map's `---SPAWN---` section; the game uses it to position
+    /// the player at launch. Editor's Spawner tab places/clears it.
+    pub spawn: Option<(i32, i32)>,
 }
 
 impl World {
@@ -333,7 +350,8 @@ impl World {
             }
             y += 1;
         }
-        World { tiles, width, height }
+        let spawn = load_spawn(map_path);
+        World { tiles, width, height, spawn }
     }
 
     /// Create a blank world of the given dimensions, all tiles empty (id = 0).
@@ -346,7 +364,7 @@ impl World {
                 ));
             }
         }
-        World { tiles, width, height }
+        World { tiles, width, height, spawn: None }
     }
 
     pub fn draw(&self, camera: (i32, i32), zoom: f32) {
@@ -373,6 +391,12 @@ impl World {
         self.tiles  = new_tiles;
         self.width  = new_width;
         self.height = new_height;
+        // Drop the spawn if the resized map no longer contains it.
+        if let Some((sx, sy)) = self.spawn {
+            if sx < 0 || sy < 0 || (sx as usize) >= new_width || (sy as usize) >= new_height {
+                self.spawn = None;
+            }
+        }
     }
 
     /// Write the map back to disk in the same space-separated format that load_map reads.
@@ -398,12 +422,21 @@ impl World {
                 .join("\n")
         };
 
-        let content = format!(
+        let mut content = format!(
             "{}\n{}\n{}",
             serialize(&id_rows),
             MAP_PHYSICS_DELIMITER,
             serialize(&ph_rows),
         );
+        // Only emit ---SPAWN--- when one is set, so maps that never used the
+        // feature stay byte-identical to before.
+        if let Some((sx, sy)) = self.spawn {
+            content.push_str(&format!("\n{}\n{} {}", MAP_SPAWN_DELIMITER, sx, sy));
+        }
+        // Ensure the target directory exists (e.g. maps/ on first save).
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            if !parent.as_os_str().is_empty() { let _ = std::fs::create_dir_all(parent); }
+        }
         std::fs::write(path, content).expect("Failed to save map");
     }
 }

@@ -1,0 +1,19 @@
+[[texture]]
+id = 1
+name = "wall"
+solid = true
+
+[[texture]]
+id = 2
+name = "floor"
+solid = false
+
+[[texture]]
+id = 3
+name = "enemy"
+solid = false
+
+[[texture]]
+id = 4
+name = "player"
+solid = false

@@ -21,12 +21,21 @@ use RustEngine::game::game_engine::{Engine, GameContext, Settings};
 
 use super::menus::MainMenuContext;
 use super::game::GameRunningContext;
+use super::tileset::Tileset;
 
 // ── Setting widgets ──────────────────────────────────────────────────────────
 
 enum SettingValue<'a> {
     Checkbox(&'a mut bool),
     Number(&'a mut f64),
+    /// Dropdown over a fixed set of choices. `value` is the stored selection;
+    /// `options` are (stored value, display label) pairs. If `value` doesn't
+    /// match any option (e.g. a stale entry), it's still shown as the current
+    /// text so the user can see what's set.
+    Choice {
+        value:   &'a mut String,
+        options: Vec<(String, String)>,
+    },
 }
 
 /// Renders one labeled setting row and adds consistent spacing below it.
@@ -37,6 +46,24 @@ fn add_setting(ui: &mut egui::Ui, name: &str, value: SettingValue<'_>) {
             ui.horizontal(|ui| {
                 ui.label(name);
                 ui.add(egui::DragValue::new(n).speed(0.1));
+            });
+        }
+        SettingValue::Choice { value, options } => {
+            // Display the matching option's label, or the raw value if it's
+            // not in the list (e.g. a stale or hand-edited setting).
+            let current_display = options.iter()
+                .find(|(v, _)| v == value)
+                .map(|(_, d)| d.clone())
+                .unwrap_or_else(|| value.clone());
+            ui.horizontal(|ui| {
+                ui.label(name);
+                egui::ComboBox::from_id_salt(name)
+                    .selected_text(current_display)
+                    .show_ui(ui, |ui| {
+                        for (v, d) in &options {
+                            ui.selectable_value(value, v.clone(), d);
+                        }
+                    });
             });
         }
     }
@@ -52,9 +79,23 @@ fn add_setting(ui: &mut egui::Ui, name: &str, value: SettingValue<'_>) {
 fn settings_for_tab<'a>(tab: SettingsTab, s: &'a mut Settings) -> Vec<(&'static str, SettingValue<'a>)> {
     use SettingValue::*;
     match tab {
-        SettingsTab::Game  => vec![
-            ("Realtime mode", Checkbox(&mut s.real_time)),
-        ],
+        SettingsTab::Game  => {
+            // Each .txt file in tilesets/ becomes a dropdown option. Path is the
+            // stored value; the file stem is the display label.
+            let tileset_options: Vec<(String, String)> = Tileset::list_in_dir()
+                .into_iter()
+                .map(|p| {
+                    let display = p.file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| p.to_string_lossy().into_owned());
+                    (p.to_string_lossy().into_owned(), display)
+                })
+                .collect();
+            vec![
+                ("Realtime mode", Checkbox(&mut s.real_time)),
+                ("Tileset",       Choice { value: &mut s.active_tileset, options: tileset_options }),
+            ]
+        }
         SettingsTab::Video => vec![
             ("Per-monitor DPI v2 (restart to apply)", Checkbox(&mut s.dpi_per_monitor)),
         ],

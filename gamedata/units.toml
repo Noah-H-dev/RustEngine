@@ -1,0 +1,10 @@
+[[unit]]
+id = 1
+name = "enemy"
+sprite_id = 3
+positions = [[8, 8]]
+patrols = [[[8, 7], [6, 2], [9, 2]]]
+
+[unit.stats]
+health = 1
+speed = 0.1

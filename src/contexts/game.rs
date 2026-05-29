@@ -39,7 +39,14 @@ impl GameContext for GameRunningContext {
         if !self.loaded {
             engine.world = World::load(&self.map_path, &self.id_path);
             engine.units = Engine::load_units(&self.id_path);
-            //here we edit the player position
+            // Every Run starts at the map's ---SPAWN--- marker (or (0, 0) when
+            // none is set). The player.toml `spawn` field is read/kept but
+            // deliberately not consulted here — see deferred-features comment
+            // in main.rs (save button + game.toml will wire that up later).
+            let start = engine.world.spawn.unwrap_or((0, 0));
+            engine.player.position        = start;
+            engine.player.target_position = start;
+            engine.player.path.clear();
             self.loaded = true;
         }
         if self.wants_settings {

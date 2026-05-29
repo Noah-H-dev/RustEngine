@@ -28,7 +28,7 @@ pub mod include {
 
 pub mod shaders{
     pub const VERT_SHADER: &str = r#"
-    #version 330 core
+    #version 410 core
 
     layout (location = 0) in vec3 pos;
     layout (location = 1) in vec2 uv;
@@ -67,8 +67,10 @@ pub mod shaders{
 
     void main()
     {
-        float alpha = smoothstep(0.0,0.1, length(texColor.rgb));
         vec4 tex_color = texture(u_tex, TexCoord)
+
+        float alpha = smoothstep(0.0,0.1, length(texColor.rgb));
+
         final_color = vec4(tex_color.rgb,tex_color.a * alpha);
         if (final_color.a < 0.01) {
             discard;
@@ -440,6 +442,7 @@ pub mod tools {
     }
 
     pub const MAP_PHYSICS_DELIMITER: &str = "---PHYSICS---";
+    pub const MAP_SPAWN_DELIMITER:   &str = "---SPAWN---";
 
     pub fn load_map(path: &str) -> Vec<Vec<i32>> {
         let file = File::open(Path::new(path)).unwrap();
@@ -472,6 +475,9 @@ pub mod tools {
                 if line.trim() == MAP_PHYSICS_DELIMITER { past_delimiter = true; }
                 continue;
             }
+            // Stop at any further delimiter (e.g. ---SPAWN---), or we'd parse
+            // its body as physics rows.
+            if line.trim() == MAP_SPAWN_DELIMITER { break; }
             let row: Vec<bool> = line
                 .split_whitespace()
                 .map(|s| s.parse::<i32>().unwrap_or(0) != 0)
@@ -480,6 +486,29 @@ pub mod tools {
         }
         result.reverse(); // same row-ordering as load_map
         result
+    }
+
+    /// Returns the per-map player spawn coordinate, if a `---SPAWN---` section
+    /// is present. Format: a single `x y` line below the delimiter. Returns
+    /// `None` when the section is absent or empty (the map has no spawn set).
+    pub fn load_spawn(path: &str) -> Option<(i32, i32)> {
+        let file = File::open(Path::new(path)).ok()?;
+        let reader = BufReader::new(file);
+        let mut past = false;
+        for line_result in reader.lines() {
+            let line = line_result.ok()?;
+            if !past {
+                if line.trim() == MAP_SPAWN_DELIMITER { past = true; }
+                continue;
+            }
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2 {
+                if let (Ok(x), Ok(y)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) {
+                    return Some((x, y));
+                }
+            }
+        }
+        None
     }
     pub fn load_textures(path: &str) -> HashMap<i32, String> {
         let file_path = Path::new(&path);
@@ -634,6 +663,7 @@ pub mod tools {
             unsafe {
                 glActiveTexture(GL_TEXTURE0);
                 glBindTexture(GL_TEXTURE_2D, self.tex_id);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST as GLint);
             }
             self.Shader.set_int(0, "u_tex");
             unsafe {

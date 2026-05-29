@@ -1,159 +1,317 @@
-// ── Tileset editor: tile-definitions manager ─────────────────────────────────
+// ── Tileset editor ───────────────────────────────────────────────────────────
 //
-// First slice of the planned tileset editor. It owns the *abstract tile
-// namespace*: creating, naming, and deleting tile ids, and editing the
-// tileset-independent properties (collision, folder). It writes the shared
-// `textures.toml` via `TileDefs` — the same model the map editor reads, so the
-// two never clobber each other's fields.
+// Owns two related concerns, one per tab:
 //
-// NOT yet here (deliberately left open): per-tileset PNG/skin assignment
-// (id→png, today `id.txt`). Each row leaves visual room for it; see the "png"
-// note in `tile_row`. When added, it edits a *tileset* file, not these defs.
+//   * Definitions — the abstract tile namespace. Create / rename / delete tile
+//     ids and edit their tileset-independent properties (collision, folder).
+//     Writes the shared `textures.toml` via `TileDefs`.
+//
+//   * Tileset — per-skin PNG assignment. The user picks (or creates) a tileset
+//     file in `tilesets/` and assigns a PNG from `assets/` to each abstract
+//     tile id. New tilesets start as a copy of whichever tileset is currently
+//     selected, so making a variant ("forest_dark" from "forest") is cheap.
+//
+// The active tileset path is persisted in `Settings.active_tileset` so the
+// selection survives restarts. Only one inline text input is ever open at a
+// time (`InlineEdit`); naming a tile, naming a folder, and naming a new
+// tileset all go through that single FSM.
 //
 // Pattern mirrors the other pure-egui contexts (settings.rs): the egui closure
-// only writes into a `DefIntent`; all state mutation happens afterwards in
-// `apply`, so there are no borrow conflicts with `tile_defs`.
+// only writes into an `Intent`; all state mutation happens afterwards in
+// `apply`, so there are no borrow conflicts with `tile_defs` or the engine.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 use RustEngine::game::game_engine::{Engine, GameContext};
 
 use super::menus::MainMenuContext;
 use super::tiledefs::TileDefs;
+use super::tileset::{Tileset, assets_pngs};
 
-/// Inline single-active text editor (top of panel), for naming a tile or
-/// setting its folder. Only one row is edited at a time — mirrors the map
-/// editor's folder-input FSM rather than juggling a buffer per row.
-enum DefEdit {
+#[derive(Clone, Copy, PartialEq)]
+enum EditorTab { Definitions, Tileset }
+
+/// Single inline text input shared across tabs (tile name, folder name, or
+/// new-tileset name). Only one is active at a time.
+enum InlineEdit {
     Idle,
-    Name   { id: i32, buf: String },
-    Folder { id: i32, buf: String },
+    DefName    { id: i32, buf: String },
+    DefFolder  { id: i32, buf: String },
+    NewTileset { buf: String, copy_from: Option<PathBuf> },
 }
 
-impl DefEdit {
-    fn is_active(&self) -> bool { !matches!(self, DefEdit::Idle) }
+impl InlineEdit {
+    fn is_active(&self) -> bool { !matches!(self, InlineEdit::Idle) }
+    fn label(&self) -> &'static str {
+        match self {
+            InlineEdit::DefName    { .. } => "Tile name:",
+            InlineEdit::DefFolder  { .. } => "Folder name:",
+            InlineEdit::NewTileset { .. } => "New tileset name:",
+            InlineEdit::Idle              => "",
+        }
+    }
+    fn buf_clone(&self) -> String {
+        match self {
+            InlineEdit::DefName { buf, .. }
+            | InlineEdit::DefFolder { buf, .. }
+            | InlineEdit::NewTileset { buf, .. } => buf.clone(),
+            InlineEdit::Idle => String::new(),
+        }
+    }
 }
 
-/// UI intents collected during one `draw`, applied afterward. Default = nothing.
+/// UI intents collected during one `draw`, applied afterward.
 #[derive(Default)]
-struct DefIntent {
-    back:               bool,
-    create:             bool,
-    toggle_solid:       Option<i32>,
-    start_rename:       Option<i32>,
-    start_folder:       Option<i32>,
-    remove_from_folder: Option<i32>,
-    delete:             Option<i32>,
-    confirm:            bool,
-    cancel:             bool,
+struct Intent {
+    back:    bool,
+    new_tab: Option<EditorTab>,
+
+    // Definitions tab
+    def_create:             bool,
+    def_toggle_solid:       Option<i32>,
+    def_start_rename:       Option<i32>,
+    def_start_folder:       Option<i32>,
+    def_remove_from_folder: Option<i32>,
+    def_delete:             Option<i32>,
+
+    // Tileset tab
+    select_tileset:     Option<PathBuf>,
+    start_new_tileset:  bool,
+    /// (tile id, Some(filename) = assign / None = clear)
+    assign_png:         Option<(i32, Option<String>)>,
+    /// Open rfd to pick a PNG from disk for this tile id.
+    pick_png_from_disk: Option<i32>,
+
+    // Shared inline editor
+    confirm: bool,
+    cancel:  bool,
 }
 
 pub struct TilesetEditorContext {
-    tile_defs: TileDefs,
-    edit:      DefEdit,
-    pending:   Option<Box<dyn GameContext>>,
+    tile_defs:       TileDefs,
+    edit:            InlineEdit,
+    active_tab:      EditorTab,
+    /// Currently selected tileset, if any. None = no tileset picked yet.
+    current_tileset: Option<Tileset>,
+    pending:         Option<Box<dyn GameContext>>,
 }
 
 impl TilesetEditorContext {
-    pub fn new() -> Self {
+    /// `active_tileset` is the persisted path from `Settings.active_tileset`.
+    /// Tileset::ensure_default has already been called by the menu, so the
+    /// file is expected to exist; we open with it as the current tileset.
+    pub fn new(active_tileset: String) -> Self {
+        let path = PathBuf::from(&active_tileset);
+        let current = if path.exists() { Some(Tileset::load(&path)) } else { None };
         TilesetEditorContext {
-            tile_defs: TileDefs::load(),
-            edit:      DefEdit::Idle,
-            pending:   None,
+            tile_defs:       TileDefs::load(),
+            edit:            InlineEdit::Idle,
+            active_tab:      EditorTab::Definitions,
+            current_tileset: current,
+            pending:         None,
         }
     }
 
-    /// Apply collected intents to state, persisting on every change.
-    fn apply(&mut self, intent: DefIntent, edit_buf: String) {
-        // Mirror the inline text input back into the FSM.
+    /// Apply collected intents to state, persisting on every change. `engine`
+    /// is here so we can update `Settings.active_tileset` and save it when the
+    /// selected tileset changes.
+    fn apply(&mut self, intent: Intent, edit_buf: String, engine: &mut Engine) {
+        // Mirror inline text buffer back into the FSM.
         match &mut self.edit {
-            DefEdit::Name   { buf, .. } => *buf = edit_buf,
-            DefEdit::Folder { buf, .. } => *buf = edit_buf,
-            DefEdit::Idle => {}
+            InlineEdit::DefName    { buf, .. } => *buf = edit_buf,
+            InlineEdit::DefFolder  { buf, .. } => *buf = edit_buf,
+            InlineEdit::NewTileset { buf, .. } => *buf = edit_buf,
+            InlineEdit::Idle => {}
         }
 
         if intent.back {
             self.pending = Some(Box::new(MainMenuContext::new()));
             return;
         }
-        if intent.create {
-            // Allocate a new abstract id and immediately open its name editor.
+        if let Some(tab) = intent.new_tab { self.active_tab = tab; }
+
+        // ── Definitions tab ──────────────────────────────────────────────────
+        if intent.def_create {
             let id = self.tile_defs.create(None);
             self.tile_defs.save();
-            self.edit = DefEdit::Name { id, buf: String::new() };
+            self.edit = InlineEdit::DefName { id, buf: String::new() };
         }
-        if let Some(id) = intent.toggle_solid {
+        if let Some(id) = intent.def_toggle_solid {
             let new = !self.tile_defs.solid_of(id);
             self.tile_defs.set_solid(id, new);
             self.tile_defs.save();
         }
-        if let Some(id) = intent.start_rename {
+        if let Some(id) = intent.def_start_rename {
             let buf = self.tile_defs.name_of(id).unwrap_or_default();
-            self.edit = DefEdit::Name { id, buf };
+            self.edit = InlineEdit::DefName { id, buf };
         }
-        if let Some(id) = intent.start_folder {
+        if let Some(id) = intent.def_start_folder {
             let buf = self.tile_defs.folder_of(id).unwrap_or_default();
-            self.edit = DefEdit::Folder { id, buf };
+            self.edit = InlineEdit::DefFolder { id, buf };
         }
-        if let Some(id) = intent.remove_from_folder {
+        if let Some(id) = intent.def_remove_from_folder {
             self.tile_defs.set_folder(id, None);
             self.tile_defs.save();
         }
-        if let Some(id) = intent.delete {
+        if let Some(id) = intent.def_delete {
             if self.tile_defs.remove(id) { self.tile_defs.save(); }
-            // Drop an edit input targeting the now-gone tile.
-            if matches!(&self.edit, DefEdit::Name { id: e, .. } | DefEdit::Folder { id: e, .. } if *e == id) {
-                self.edit = DefEdit::Idle;
+            // Also clear this id from the current tileset — keeping a PNG
+            // mapping for a non-existent definition would dangle.
+            if let Some(ts) = &mut self.current_tileset {
+                if ts.png_of(id).is_some() {
+                    ts.set_png(id, None);
+                    ts.save();
+                }
+            }
+            // Drop an open inline editor that targeted the now-gone tile.
+            if matches!(&self.edit,
+                InlineEdit::DefName { id: e, .. } | InlineEdit::DefFolder { id: e, .. } if *e == id)
+            {
+                self.edit = InlineEdit::Idle;
             }
         }
-        if intent.cancel {
-            self.edit = DefEdit::Idle;
+
+        // ── Tileset tab ──────────────────────────────────────────────────────
+        if let Some(path) = intent.select_tileset {
+            self.current_tileset = Some(Tileset::load(&path));
+            engine.settings.active_tileset = path.to_string_lossy().into_owned();
+            engine.settings.save();
         }
+        if intent.start_new_tileset {
+            // New tilesets start as a copy of the currently-selected one (if any).
+            let copy_from = self.current_tileset.as_ref().map(|t| t.path.clone());
+            self.edit = InlineEdit::NewTileset { buf: String::new(), copy_from };
+        }
+        if let Some((id, png)) = intent.assign_png {
+            if let Some(ts) = &mut self.current_tileset {
+                ts.set_png(id, png);
+                ts.save();
+            }
+        }
+        if let Some(id) = intent.pick_png_from_disk {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("PNG Image", &["png"])
+                .set_directory("assets")
+                .pick_file()
+            {
+                // Copy into assets/ if not already there, then assign filename.
+                let name = path.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if !name.is_empty() {
+                    let dest = std::path::Path::new("assets").join(&name);
+                    if !dest.exists() {
+                        let _ = std::fs::copy(&path, &dest);
+                    }
+                    if let Some(ts) = &mut self.current_tileset {
+                        ts.set_png(id, Some(name));
+                        ts.save();
+                    }
+                }
+            }
+        }
+
+        // ── Shared inline editor confirm / cancel ────────────────────────────
+        if intent.cancel { self.edit = InlineEdit::Idle; }
         if intent.confirm {
-            match std::mem::replace(&mut self.edit, DefEdit::Idle) {
-                DefEdit::Name { id, buf } => {
+            match std::mem::replace(&mut self.edit, InlineEdit::Idle) {
+                InlineEdit::DefName { id, buf } => {
                     let name = buf.trim();
                     self.tile_defs.set_name(id, if name.is_empty() { None } else { Some(name.to_string()) });
                     self.tile_defs.save();
                 }
-                DefEdit::Folder { id, buf } => {
+                InlineEdit::DefFolder { id, buf } => {
                     let folder = buf.trim();
                     self.tile_defs.set_folder(id, if folder.is_empty() { None } else { Some(folder.to_string()) });
                     self.tile_defs.save();
                 }
-                DefEdit::Idle => {}
+                InlineEdit::NewTileset { buf, copy_from } => {
+                    let name = buf.trim();
+                    if !name.is_empty() {
+                        let source = copy_from.as_ref().map(Tileset::load);
+                        let ts = Tileset::create(name, source.as_ref());
+                        ts.save();
+                        engine.settings.active_tileset = ts.path.to_string_lossy().into_owned();
+                        engine.settings.save();
+                        self.current_tileset = Some(ts);
+                        // Hop into the Tileset tab so you're already where you can
+                        // start assigning PNGs.
+                        self.active_tab = EditorTab::Tileset;
+                    }
+                }
+                InlineEdit::Idle => {}
             }
         }
     }
 }
 
-/// Render one tile-definition row, emitting intents only.
-fn tile_row(ui: &mut egui::Ui, def: &super::tiledefs::TileDef, intent: &mut DefIntent) {
+/// Render one row in the Definitions tab.
+fn def_row(ui: &mut egui::Ui, def: &super::tiledefs::TileDef, intent: &mut Intent) {
     ui.horizontal(|ui| {
         let name = def.name.as_deref().unwrap_or("(unnamed)");
         ui.label(format!("{:>3} | {}", def.id, name));
-
-        // Quick collision toggle.
         let solid_label = if def.solid { "Solid" } else { "Passable" };
-        if ui.button(solid_label).clicked() { intent.toggle_solid = Some(def.id); }
-
-        // Folder indicator.
+        if ui.button(solid_label).clicked() { intent.def_toggle_solid = Some(def.id); }
         match &def.folder {
             Some(f) => { ui.weak(format!("[{}]", f)); }
             None    => { ui.weak("(no folder)"); }
         }
-
-        // Per-tileset PNG/skin lives elsewhere; placeholder marks where it'll go.
-        ui.weak("png: -");
-
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.menu_button("...", |ui| {
-                if ui.button("Rename").clicked()     { intent.start_rename = Some(def.id); ui.close(); }
-                if ui.button("Set folder").clicked() { intent.start_folder = Some(def.id); ui.close(); }
+                if ui.button("Rename").clicked()     { intent.def_start_rename = Some(def.id); ui.close(); }
+                if ui.button("Set folder").clicked() { intent.def_start_folder = Some(def.id); ui.close(); }
                 if def.folder.is_some() && ui.button("Remove from folder").clicked() {
-                    intent.remove_from_folder = Some(def.id);
+                    intent.def_remove_from_folder = Some(def.id);
                     ui.close();
                 }
                 ui.separator();
-                if ui.button("Delete").clicked() { intent.delete = Some(def.id); ui.close(); }
+                if ui.button("Delete").clicked() { intent.def_delete = Some(def.id); ui.close(); }
+            });
+        });
+    });
+}
+
+/// Render one row in the Tileset tab — shows the PNG assigned for this tile
+/// in the currently-selected tileset, with an Assign PNG submenu.
+fn skin_row(
+    ui: &mut egui::Ui,
+    def: &super::tiledefs::TileDef,
+    current_png: Option<&str>,
+    assets: &[String],
+    intent: &mut Intent,
+) {
+    ui.horizontal(|ui| {
+        let name = def.name.as_deref().unwrap_or("(unnamed)");
+        ui.label(format!("{:>3} | {}", def.id, name));
+        match current_png {
+            Some(p) => { ui.label(format!("PNG: {}", p)); }
+            None    => { ui.weak("(unassigned)"); }
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.menu_button("...", |ui| {
+                ui.menu_button("Assign PNG", |ui| {
+                    if assets.is_empty() {
+                        ui.weak("(no PNGs in assets/)");
+                    } else {
+                        for asset in assets {
+                            let selected = current_png == Some(asset.as_str());
+                            if ui.selectable_label(selected, asset).clicked() {
+                                intent.assign_png = Some((def.id, Some(asset.clone())));
+                                ui.close();
+                            }
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("Pick from disk...").clicked() {
+                        intent.pick_png_from_disk = Some(def.id);
+                        ui.close();
+                    }
+                });
+                if current_png.is_some() && ui.button("Clear assignment").clicked() {
+                    intent.assign_png = Some((def.id, None));
+                    ui.close();
+                }
             });
         });
     });
@@ -165,17 +323,28 @@ impl GameContext for TilesetEditorContext {
     }
 
     fn draw(&mut self, engine: &mut Engine) {
-        let mut intent = DefIntent::default();
+        let mut intent = Intent::default();
 
-        // Snapshot the active inline editor's buffer for the text field.
-        let editing = self.edit.is_active();
-        let (edit_label, mut edit_buf) = match &self.edit {
-            DefEdit::Name   { .. }  => ("Tile name:",   self.edit_buf_clone()),
-            DefEdit::Folder { .. }  => ("Folder name:", self.edit_buf_clone()),
-            DefEdit::Idle           => ("",             String::new()),
-        };
+        // Snapshots taken before the egui closure to avoid borrow conflicts.
+        let editing      = self.edit.is_active();
+        let edit_label   = self.edit.label();
+        let mut edit_buf = self.edit.buf_clone();
 
-        let defs = self.tile_defs.sorted();
+        let defs         = self.tile_defs.sorted();
+        let active_tab   = self.active_tab;
+        let tileset_name = self.current_tileset.as_ref().map(|t| t.name());
+        let tileset_path = self.current_tileset.as_ref().map(|t| t.path.clone());
+        let tileset_list = Tileset::list_in_dir();
+        // Only scan assets/ when actually on the Tileset tab — saves work and
+        // also avoids running it when no skin work is happening.
+        let assets = if active_tab == EditorTab::Tileset { assets_pngs() } else { Vec::new() };
+        // Snapshot current PNG assignments for the visible defs.
+        let png_for: HashMap<i32, String> = self.current_tileset.as_ref()
+            .map(|t| defs.iter()
+                .filter_map(|d| t.png_of(d.id).map(|p| (d.id, p.to_string())))
+                .collect())
+            .unwrap_or_default();
+
         let (w, h) = engine.screen_size();
         let input  = engine.egui_input.clone();
 
@@ -185,17 +354,53 @@ impl GameContext for TilesetEditorContext {
                 ui.horizontal(|ui| {
                     if ui.button("< Menu").clicked() { intent.back = true; }
                     ui.separator();
-                    ui.heading("Tile Definitions");
+
+                    // Tab bar.
+                    if ui.selectable_label(active_tab == EditorTab::Definitions, "Definitions").clicked() {
+                        intent.new_tab = Some(EditorTab::Definitions);
+                    }
+                    if ui.selectable_label(active_tab == EditorTab::Tileset, "Tileset").clicked() {
+                        intent.new_tab = Some(EditorTab::Tileset);
+                    }
                     ui.separator();
-                    if ui.button("+ New Tile").clicked() { intent.create = true; }
-                    ui.separator();
-                    ui.label(format!("{} tiles", defs.len()));
+
+                    // Per-tab toolbar action.
+                    match active_tab {
+                        EditorTab::Definitions => {
+                            if ui.button("+ New Tile").clicked() { intent.def_create = true; }
+                            ui.separator();
+                            ui.label(format!("{} tiles", defs.len()));
+                        }
+                        EditorTab::Tileset => {
+                            let label = match &tileset_name {
+                                Some(n) => format!("Tileset: {}", n),
+                                None    => "Tileset: (none)".to_string(),
+                            };
+                            ui.menu_button(label, |ui| {
+                                for path in &tileset_list {
+                                    let name = path.file_stem()
+                                        .map(|s| s.to_string_lossy().into_owned())
+                                        .unwrap_or_default();
+                                    let selected = tileset_path.as_ref() == Some(path);
+                                    if ui.selectable_label(selected, name).clicked() {
+                                        intent.select_tileset = Some(path.clone());
+                                        ui.close();
+                                    }
+                                }
+                                if !tileset_list.is_empty() { ui.separator(); }
+                                if ui.button("New tileset...").clicked() {
+                                    intent.start_new_tileset = true;
+                                    ui.close();
+                                }
+                            });
+                        }
+                    }
                 });
                 ui.add_space(6.0);
             });
 
             egui::CentralPanel::default().show(ctx, |ui| {
-                // Inline name / folder editor.
+                // Shared inline editor.
                 if editing {
                     ui.add_space(6.0);
                     ui.label(edit_label);
@@ -211,29 +416,41 @@ impl GameContext for TilesetEditorContext {
                     ui.separator();
                 }
 
-                if defs.is_empty() {
-                    ui.add_space(12.0);
-                    ui.weak("No tiles yet - click \"+ New Tile\" to define one.");
-                    return;
-                }
-
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for def in &defs {
-                        tile_row(ui, def, &mut intent);
+                match active_tab {
+                    EditorTab::Definitions => {
+                        if defs.is_empty() {
+                            ui.add_space(12.0);
+                            ui.weak("No tiles yet - click \"+ New Tile\" to define one.");
+                            return;
+                        }
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            for def in &defs {
+                                def_row(ui, def, &mut intent);
+                            }
+                        });
                     }
-                });
+                    EditorTab::Tileset => {
+                        if tileset_name.is_none() {
+                            ui.add_space(12.0);
+                            ui.weak("No tileset selected. Pick one from the menu above, or create a new one.");
+                            return;
+                        }
+                        if defs.is_empty() {
+                            ui.add_space(12.0);
+                            ui.weak("No tile definitions to skin. Switch to Definitions tab to add tiles first.");
+                            return;
+                        }
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            for def in &defs {
+                                let current = png_for.get(&def.id).map(String::as_str);
+                                skin_row(ui, def, current, &assets, &mut intent);
+                            }
+                        });
+                    }
+                }
             });
         });
 
-        self.apply(intent, edit_buf);
-    }
-}
-
-impl TilesetEditorContext {
-    fn edit_buf_clone(&self) -> String {
-        match &self.edit {
-            DefEdit::Name { buf, .. } | DefEdit::Folder { buf, .. } => buf.clone(),
-            DefEdit::Idle => String::new(),
-        }
+        self.apply(intent, edit_buf, engine);
     }
 }

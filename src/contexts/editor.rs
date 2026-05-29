@@ -41,7 +41,7 @@
 // ── Adding a new field / feature to EditorContext ────────────────────────────
 // All runtime state lives in `EditorContext`. Initialise new fields in the
 // single `with_world` constructor (both `from_file` and `new_map` call it).
-// For FSM-style features (e.g. a multi-step dialog), follow the `TexAction` /
+// For FSM-style features (e.g. a multi-step dialog), follow the
 // `SpawnerFormAction` pattern: define an action enum, store it in `EditorIntent`,
 // and apply it in a dedicated handler method.
 //
@@ -65,6 +65,7 @@ use RustEngine::shaders::{VERT_SHADER, FRAG_SHADER};
 use std::collections::HashMap;
 use super::menus::MainMenuContext;
 use super::tiledefs::TileDefs;
+use super::tileset::Tileset;
 
 // ── Editor ─────────────────────────────────────────────────────────────────────
 
@@ -93,12 +94,14 @@ fn tile_display_name(id: i32, path: &str) -> String {
     format!("{} | {}", id, path)
 }
 
-/// Render one texture row in the palette: a selectable `id | name` label, with a
-/// `...` menu on the far right holding the collision dropdown, the move-to-folder
-/// submenu, and Delete. Emits intents only — never mutates editor state directly.
+/// Render one texture row in the palette: a selectable label (caller composes
+/// it — typically `id | <tile-def name>`), with a `...` menu on the far right
+/// holding the collision dropdown and the move-to-folder submenu. Emits intents
+/// only — never mutates editor state directly.
 fn texture_row(
     ui: &mut egui::Ui,
     entry: &PaletteEntry,
+    label: &str,
     selected: bool,
     solid: bool,
     current_folder: Option<&str>,
@@ -106,7 +109,7 @@ fn texture_row(
     intent: &mut EditorIntent,
 ) {
     ui.horizontal(|ui| {
-        if ui.selectable_label(selected, entry.display()).clicked() {
+        if ui.selectable_label(selected, label).clicked() {
             intent.new_selected = Some(entry.id);
         }
         // Push the overflow menu to the far right of the row.
@@ -141,28 +144,10 @@ fn texture_row(
                         ui.close();
                     }
                 });
-                ui.separator();
-                if ui.button("Delete").clicked() {
-                    intent.delete_texture_id = Some(entry.id);
-                    ui.close();
-                }
             });
         });
     });
 }
-
-// ── Texture-creation FSM ─────────────────────────────────────────────────────
-// State lives in EditorContext::tex_new_state; actions are emitted by the UI
-// and applied in handle_tex.
-
-enum TexNewState {
-    Idle,
-    Conflict { source: std::path::PathBuf, proposed_name: String },
-    Renaming { source: std::path::PathBuf, new_name: String },
-}
-
-#[derive(Clone, Copy)]
-enum TexAction { PickFile, Overwrite, StartRename, ConfirmRename, Cancel }
 
 // ── Folder-naming FSM ────────────────────────────────────────────────────────
 // Inline text input shown at the top of the Textures panel, used both to name a
@@ -190,6 +175,16 @@ enum SpawnerMode {
 
 #[derive(Clone, Copy)]
 enum SpawnerFormAction { OpenCreate, OpenEdit(usize), Confirm, Cancel }
+
+/// What's selected as the spawner-tab brush. `Unit(id)` paints unit instances
+/// (existing behavior). `PlayerSpawn` paints / clears the per-map player
+/// spawnpoint stored on `World::spawn` — max 1 per map.
+#[derive(Clone, Copy, PartialEq)]
+enum SpawnerBrush {
+    None,
+    Unit(u32),
+    PlayerSpawn,
+}
 
 /// Ephemeral editor state while creating or editing a Unit — never serialized.
 #[derive(Clone)]
@@ -229,12 +224,12 @@ struct EditorIntent {
     patrol_esc:       bool,
     // Spawner panel
     spawner_form:         Option<SpawnerFormAction>,
-    new_selected_spawner: Option<u32>,
+    new_spawner_brush:    Option<SpawnerBrush>,
     delete_spawner_id:    Option<u32>,
     new_draft_sprite:     Option<i32>,
-    // Texture panel
-    tex_action:        Option<TexAction>,
-    delete_texture_id: Option<i32>,
+    /// Open file dialog to pick a PNG, register it as a new tile, and select
+    /// it as the draft unit's sprite.
+    add_unit_sprite_png:  bool,
     // Set a texture's default collision: (texture id, solid).
     set_texture_solid: Option<(i32, bool)>,
     // Folder management
@@ -267,13 +262,15 @@ pub struct EditorContext {
     /// Physics painter brush: true = paint solid, false = paint passable.
     physics_brush_solid: bool,
     right_panel_open: bool,
+    /// Path of the tileset (id->png file) this editor session opened with.
+    /// Used to write back when adding a unit-sprite PNG and to reload the palette.
     id_path: String,
-    tex_new_state: TexNewState,
     spawner_mode: SpawnerMode,
     spawner_draft: UnitDraft,
     spawner_units: Vec<UnitRecord>,
-    /// The id of the template currently selected as the active placement brush.
-    selected_spawner_id: Option<u32>,
+    /// Active brush for the Spawner tab — a unit template, the player-spawn
+    /// marker, or nothing selected.
+    spawner_brush: SpawnerBrush,
     /// Cached GLObjects keyed by palette id, used to draw unit sprites in the editor.
     unit_sprite_cache: HashMap<i32, GLObject>,
     /// Some((draft_w, draft_h)) while the resize dialog is open.
@@ -286,6 +283,8 @@ pub struct EditorContext {
 }
 
 impl EditorContext {
+    const UNITS_PATH: &'static str = "gamedata/units.toml";
+
     /// Open an existing map file for editing.
     pub fn from_file(map_path: &str, id_path: &str) -> Result<Self, String> {
         if !std::path::Path::new(map_path).exists() {
@@ -319,11 +318,10 @@ impl EditorContext {
             physics_brush_solid: true,
             right_panel_open: true,
             id_path: id_path.to_string(),
-            tex_new_state: TexNewState::Idle,
             spawner_mode: SpawnerMode::Idle,
             spawner_draft: UnitDraft::new(),
             spawner_units: Self::load_units(),
-            selected_spawner_id: None,
+            spawner_brush: SpawnerBrush::None,
             unit_sprite_cache,
             resize_dialog: None,
             zoom: 1.0,
@@ -350,47 +348,25 @@ impl EditorContext {
             .collect()
     }
 
-    /// Scan `assets/` for PNG files and reconcile with the id file.
-    /// Files in the id file that no longer exist on disk are dropped.
-    /// New files found in assets get auto-assigned IDs.
+    /// Build the palette purely from the loaded tileset (`id_path`) — the
+    /// tileset is the source of truth for what's paintable. Stray PNGs in
+    /// `assets/` that aren't bound to a tile in the active tileset do NOT
+    /// appear here; add them via the Tileset editor's "Assign PNG" flow first.
     fn load_palette(id_path: &str) -> Vec<PaletteEntry> {
-        // Load existing id→path mappings from the id file.
-        let existing: HashMap<String, i32> = if std::path::Path::new(id_path).exists() {
-            load_textures(id_path).into_iter().map(|(id, path)| (path, id)).collect()
-        } else {
-            HashMap::new()
-        };
-
-        // Scan assets/ for PNGs — these are the source of truth.
-        let mut png_files: Vec<String> = std::fs::read_dir("assets")
-            .map(|dir| {
-                dir.filter_map(|e| e.ok())
-                    .filter_map(|e| {
-                        let name = e.file_name().to_string_lossy().into_owned();
-                        if name.to_lowercase().ends_with(".png") { Some(name) } else { None }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        png_files.sort();
-
-        let mut next_id = existing.values().copied().max().unwrap_or(0) + 1;
-        let mut entries: Vec<PaletteEntry> = png_files.into_iter().map(|filename| {
-            let id = existing.get(&filename).copied().unwrap_or_else(|| {
-                let id = next_id;
-                next_id += 1;
-                id
-            });
-            PaletteEntry { id, path: filename }
-        }).collect();
-
+        if !std::path::Path::new(id_path).exists() {
+            return Vec::new();
+        }
+        let mut entries: Vec<PaletteEntry> = load_textures(id_path)
+            .into_iter()
+            .map(|(id, path)| PaletteEntry { id, path })
+            .collect();
         entries.sort_by_key(|e| e.id);
         entries
     }
 
     fn load_units() -> Vec<UnitRecord> {
-        if !std::path::Path::new("units.toml").exists() { return Vec::new(); }
-        let content = std::fs::read_to_string("units.toml").unwrap_or_default();
+        if !std::path::Path::new(Self::UNITS_PATH).exists() { return Vec::new(); }
+        let content = std::fs::read_to_string(Self::UNITS_PATH).unwrap_or_default();
         toml::from_str::<UnitFile>(&content)
             .map(|f| f.unit)
             .unwrap_or_default()
@@ -399,40 +375,8 @@ impl EditorContext {
     fn save_units(&self) {
         let file    = UnitFile { unit: self.spawner_units.clone() };
         let content = toml::to_string(&file).expect("Failed to serialize units");
-        std::fs::write("units.toml", content).expect("Failed to save units.toml");
-    }
-
-    fn save_palette(&self) {
-        let content = self.palette.iter()
-            .filter(|e| e.id != 0)
-            .map(|e| format!("{} {}", e.id, e.path))
-            .collect::<Vec<_>>()
-            .join("\n");
-        std::fs::write(&self.id_path, content).expect("Failed to save id file");
-    }
-
-    /// Copy `source` into `assets/<filename>` and register it in the palette + id file.
-    fn register_texture(&mut self, source: &std::path::Path, filename: &str) {
-        let dest = std::path::Path::new("assets").join(filename);
-        std::fs::copy(source, &dest).expect("Failed to copy texture into assets/");
-        let new_id = self.palette.iter().map(|e| e.id).max().unwrap_or(0) + 1;
-        self.palette.push(PaletteEntry { id: new_id, path: filename.to_string() });
-        self.palette.sort_by_key(|e| e.id);
-        self.save_palette();
-        self.unit_sprite_cache = Self::build_sprite_cache(&self.palette);
-    }
-
-    /// Register `source` under `name` if the destination is free; otherwise
-    /// stash both into a `Conflict` state so the UI can prompt the user.
-    /// Either way, `tex_new_state` is left in the correct terminal state.
-    fn try_register_texture(&mut self, source: std::path::PathBuf, name: String) {
-        let dest = std::path::Path::new("assets").join(&name);
-        if dest.exists() {
-            self.tex_new_state = TexNewState::Conflict { source, proposed_name: name };
-        } else {
-            self.register_texture(&source, &name);
-            self.tex_new_state = TexNewState::Idle;
-        }
+        let _ = std::fs::create_dir_all("gamedata");
+        std::fs::write(Self::UNITS_PATH, content).expect("Failed to save units.toml");
     }
 
     /// Convert a screen-space position (egui coords, y=0 at top) to a
@@ -522,14 +466,36 @@ impl EditorContext {
     /// Right-click on a unit → delete the instance.
     fn handle_unit_clicks(&mut self, active_tab: RightPanelTab, intent: &EditorIntent, screen_h: u32, camera: (i32, i32)) {
         if active_tab != RightPanelTab::CharacterSpawner { return; }
+        let brush = self.spawner_brush;
+
+        // Player-spawn brush has its own click semantics — no unit interaction.
+        if brush == SpawnerBrush::PlayerSpawn {
+            if let Some(pos) = intent.click_pos {
+                self.at_tile(pos, screen_h, camera, |this, _idx, tile_pos| {
+                    // Overwrites any existing spawn (max 1 per map). Allowed on
+                    // solid tiles for now — the player will simply be stuck if
+                    // it's not walkable, which is the user's choice.
+                    this.world.spawn = Some(tile_pos);
+                });
+            }
+            if intent.erase_pos.is_some() {
+                // Right-click clears the spawn regardless of which tile is
+                // under the cursor — there's only ever one to clear.
+                self.world.spawn = None;
+            }
+            return;
+        }
+
+        // Unit brush (or no brush) — original behaviour.
         if let Some(pos) = intent.click_pos {
             self.at_tile(pos, screen_h, camera, |this, idx, tile_pos| {
                 if let Some((unit_id, instance_idx)) = this.find_unit_at_tile(tile_pos) {
                     // Click on a placed unit → enter patrol painting for that instance.
                     // The right panel auto-hides via the `!is_patrol_painting` render guard.
                     this.spawner_mode = SpawnerMode::PatrolPainting { unit_id, instance_idx };
-                } else if let Some(sel_id) = this.selected_spawner_id {
-                    // Empty tile + brush selected → place a new instance (skip solid tiles).
+                } else if let SpawnerBrush::Unit(sel_id) = brush {
+                    // Empty tile + unit brush selected → place a new instance
+                    // (skip solid tiles).
                     if !this.world.tiles[idx].physics.solid {
                         if let Some(record) = this.find_unit_mut(sel_id) {
                             record.positions.push(tile_pos);
@@ -592,10 +558,14 @@ impl EditorContext {
             self.spawner_draft.speed  = draft_speed;
             if let Some(s) = intent.new_draft_sprite { self.spawner_draft.sprite_id = Some(s); }
         }
-        if let Some(id) = intent.new_selected_spawner { self.selected_spawner_id = Some(id); }
+        if let Some(b) = intent.new_spawner_brush { self.spawner_brush = b; }
         if let Some(del_id) = intent.delete_spawner_id {
             self.spawner_units.retain(|u| u.id != del_id);
-            if self.selected_spawner_id == Some(del_id) { self.selected_spawner_id = None; }
+            // If the deleted unit was the active brush, drop back to None so the
+            // brush doesn't dangle on a non-existent template.
+            if matches!(self.spawner_brush, SpawnerBrush::Unit(id) if id == del_id) {
+                self.spawner_brush = SpawnerBrush::None;
+            }
             // Defensive: if a future code path lets you delete while patrol-painting
             // that unit, drop back to Idle so we're not pointing at a dead instance.
             if let SpawnerMode::PatrolPainting { unit_id, .. } = self.spawner_mode {
@@ -651,53 +621,44 @@ impl EditorContext {
         }
     }
 
-    fn handle_tex(&mut self, intent: &EditorIntent, rename_text: String) {
-        // Mirror the rename text input back into the FSM state.
-        if let TexNewState::Renaming { new_name, .. } = &mut self.tex_new_state {
-            *new_name = rename_text;
+    /// "+ Add PNG" from the spawner unit form: pick a PNG via rfd, copy it into
+    /// `assets/` if needed, allocate a new abstract tile id (naming it after
+    /// the unit being edited if a draft name is set), assign the PNG in the
+    /// active tileset, reload the palette so the new entry shows up
+    /// immediately, and select it as the draft unit's sprite. This is the
+    /// "thin shortcut that delegates to central allocation" mentioned in the
+    /// architecture memory — the alloc goes through `TileDefs::create`. Must
+    /// be dispatched AFTER `handle_spawner` so `spawner_draft.name` is fresh.
+    fn handle_add_unit_sprite_png(&mut self, intent: &EditorIntent) {
+        if !intent.add_unit_sprite_png { return; }
+        let Some(picked) = rfd::FileDialog::new()
+            .add_filter("PNG Image", &["png"])
+            .set_directory("assets")
+            .pick_file() else { return; };
+        let Some(filename) = picked.file_name().map(|n| n.to_string_lossy().into_owned()) else { return; };
+        if filename.is_empty() { return; }
+        // Copy into assets/ if not already there.
+        let dest = std::path::Path::new("assets").join(&filename);
+        if !dest.exists() {
+            let _ = std::fs::copy(&picked, &dest);
         }
-        if let Some(id) = intent.delete_texture_id {
-            self.palette.retain(|e| e.id != id);
-            if self.selected_id == Some(id) { self.selected_id = None; }
-            self.save_palette();
-            if self.tile_defs.remove(id) { self.tile_defs.save(); }
-            self.unit_sprite_cache = Self::build_sprite_cache(&self.palette);
-        }
-        let Some(action) = intent.tex_action else { return; };
-        match action {
-            TexAction::PickFile => {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("PNG Image", &["png"])
-                    .set_directory("assets")
-                    .pick_file()
-                {
-                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                    self.try_register_texture(path, name);
-                }
-            }
-            TexAction::Overwrite => {
-                if let TexNewState::Conflict { source, proposed_name } = &self.tex_new_state {
-                    let (src, name) = (source.clone(), proposed_name.clone());
-                    self.register_texture(&src, &name);
-                    self.tex_new_state = TexNewState::Idle;
-                }
-            }
-            TexAction::StartRename => {
-                if let TexNewState::Conflict { source, proposed_name } = &self.tex_new_state {
-                    self.tex_new_state = TexNewState::Renaming {
-                        source: source.clone(),
-                        new_name: proposed_name.clone(),
-                    };
-                }
-            }
-            TexAction::ConfirmRename => {
-                if let TexNewState::Renaming { source, new_name } = &self.tex_new_state {
-                    let (src, name) = (source.clone(), new_name.clone());
-                    self.try_register_texture(src, name);
-                }
-            }
-            TexAction::Cancel => { self.tex_new_state = TexNewState::Idle; }
-        }
+        // Inherit the unit's name (if any) so the new tile def is identifiable
+        // — e.g. naming a unit "Goblin" before + Add PNG yields a "Goblin" tile.
+        let tile_name = {
+            let n = self.spawner_draft.name.trim();
+            if n.is_empty() { None } else { Some(n.to_string()) }
+        };
+        // Allocate a new abstract tile id, assign the PNG in the loaded tileset.
+        let id = self.tile_defs.create(tile_name);
+        self.tile_defs.save();
+        let mut ts = Tileset::load(&self.id_path);
+        ts.set_png(id, Some(filename));
+        ts.save();
+        // Reload palette + sprite cache so the new entry is immediately visible.
+        self.palette           = Self::load_palette(&self.id_path);
+        self.unit_sprite_cache = Self::build_sprite_cache(&self.palette);
+        // Auto-select it as the draft unit's sprite.
+        self.spawner_draft.sprite_id = Some(id);
     }
 
     /// Apply folder intents: open/confirm/cancel the inline name input, move a
@@ -843,13 +804,6 @@ impl GameContext for EditorContext {
         let active_tab       = self.active_tab;
         let physics_brush    = self.physics_brush_solid;
         let panel_open       = self.right_panel_open;
-        let tex_in_conflict  = matches!(self.tex_new_state, TexNewState::Conflict { .. });
-        let tex_in_renaming  = matches!(self.tex_new_state, TexNewState::Renaming  { .. });
-        let (conflict_filename, mut rename_text) = match &self.tex_new_state {
-            TexNewState::Conflict { proposed_name, .. } => (proposed_name.clone(), proposed_name.clone()),
-            TexNewState::Renaming { new_name, .. }      => (String::new(),          new_name.clone()),
-            TexNewState::Idle                           => (String::new(),          String::new()),
-        };
         // Folder-input snapshot: editable name + which mode (new vs rename) is active.
         let folder_naming   = matches!(self.folder_edit, FolderEdit::NamingNew { .. });
         let folder_renaming = matches!(self.folder_edit, FolderEdit::Renaming  { .. });
@@ -866,7 +820,7 @@ impl GameContext for EditorContext {
                 .map(|u| format!("{} (instance {})", if u.name.is_empty() { "(unnamed)" } else { &u.name }, instance_idx))
                 .unwrap_or_default()
         } else { String::new() };
-        let selected_spawner_id = self.selected_spawner_id;
+        let spawner_brush       = self.spawner_brush;
         let mut draft_name     = self.spawner_draft.name.clone();
         let draft_sprite       = self.spawner_draft.sprite_id;
         let mut draft_health   = self.spawner_draft.health;
@@ -901,6 +855,14 @@ impl GameContext for EditorContext {
                     })
                     .unwrap_or_default()
             } else { vec![] };
+
+        // Player-spawn marker (only visible in the Spawner tab — like patrol
+        // nodes and physics tint, it's editor metadata, not gameplay).
+        let spawn_marker: Option<egui::Rect> = if active_tab == RightPanelTab::CharacterSpawner {
+            self.world.spawn.map(|(sx, sy)| tile_rect(sx as f32, sy as f32))
+        } else {
+            None
+        };
 
         let patrol_lines: Vec<(egui::Pos2, egui::Pos2)> = patrol_nodes.windows(2)
             .map(|w| (w[0].0.center(), w[1].0.center()))
@@ -946,12 +908,25 @@ impl GameContext for EditorContext {
                                 ui.label(if physics_brush { "Brush: solid" } else { "Brush: passable" });
                             }
                             RightPanelTab::CharacterSpawner => {
-                                match selected_spawner_id.and_then(|id| self.spawner_units.iter().find(|u| u.id == id)) {
-                                    Some(u) => { ui.label(format!("Brush: {} — left-click to place / edit patrol, right-click to delete", u.name)); }
-                                    None    => { ui.colored_label(
-                                        egui::Color32::from_rgb(220, 180, 60),
-                                        "No unit selected — pick one from the panel (right-click to delete any placed unit)",
-                                    ); }
+                                match spawner_brush {
+                                    SpawnerBrush::PlayerSpawn => {
+                                        ui.label("Brush: player spawn — left-click to place (max 1 per map), right-click to clear");
+                                    }
+                                    SpawnerBrush::Unit(id) => {
+                                        match self.spawner_units.iter().find(|u| u.id == id) {
+                                            Some(u) => { ui.label(format!("Brush: {} — left-click to place / edit patrol, right-click to delete", u.name)); }
+                                            None    => { ui.colored_label(
+                                                egui::Color32::from_rgb(220, 180, 60),
+                                                "Selected unit is gone — pick another from the panel",
+                                            ); }
+                                        }
+                                    }
+                                    SpawnerBrush::None => {
+                                        ui.colored_label(
+                                            egui::Color32::from_rgb(220, 180, 60),
+                                            "No brush selected — pick one from the panel (right-click to delete any placed unit)",
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -986,28 +961,6 @@ impl GameContext for EditorContext {
 
                         match active_tab {
                             RightPanelTab::TexturePalette => {
-                                // Conflict / rename prompts shown at the top of the panel.
-                                if tex_in_conflict {
-                                    ui.colored_label(
-                                        egui::Color32::from_rgb(220, 180, 60),
-                                        format!("'{}' already exists.", conflict_filename),
-                                    );
-                                    ui.horizontal(|ui| {
-                                        if ui.button("Overwrite").clicked() { intent.tex_action = Some(TexAction::Overwrite);   }
-                                        if ui.button("Rename").clicked()    { intent.tex_action = Some(TexAction::StartRename); }
-                                        if ui.button("Cancel").clicked()    { intent.tex_action = Some(TexAction::Cancel);      }
-                                    });
-                                    ui.separator();
-                                } else if tex_in_renaming {
-                                    ui.label("New filename:");
-                                    ui.text_edit_singleline(&mut rename_text);
-                                    ui.horizontal(|ui| {
-                                        if ui.button("Confirm").clicked() { intent.tex_action = Some(TexAction::ConfirmRename); }
-                                        if ui.button("Cancel").clicked()  { intent.tex_action = Some(TexAction::Cancel);        }
-                                    });
-                                    ui.separator();
-                                }
-
                                 // Inline folder-name input (creating a new folder or renaming one).
                                 if folder_naming || folder_renaming {
                                     ui.label(if folder_naming { "New folder name:" } else { "Rename folder:" });
@@ -1019,8 +972,6 @@ impl GameContext for EditorContext {
                                     ui.separator();
                                 }
 
-                                if ui.button("+ New Texture").clicked() { intent.tex_action = Some(TexAction::PickFile); }
-                                ui.separator();
                                 if ui.selectable_label(self.selected_id == Some(0), "(eraser)").clicked() {
                                     intent.new_selected = Some(0);
                                 }
@@ -1040,6 +991,14 @@ impl GameContext for EditorContext {
                                     };
                                     let solid_of  = |id: i32| self.tile_defs.solid_of(id);
                                     let folder_of = |id: i32| self.tile_defs.folder_of(id);
+                                    // Prefer the tile-def name; fall back to the PNG filename
+                                    // so unnamed tiles are still distinguishable in the row.
+                                    let label_of = |e: &PaletteEntry| -> String {
+                                        match self.tile_defs.name_of(e.id) {
+                                            Some(n) if !n.is_empty() => format!("{} | {}", e.id, n),
+                                            _                        => format!("{} | {}", e.id, e.path),
+                                        }
+                                    };
 
                                     // Folders first — each a collapsible group with its own ... menu.
                                     for folder in &folders {
@@ -1065,7 +1024,8 @@ impl GameContext for EditorContext {
                                                     if entry.id == 0 { continue; }
                                                     if folder_of(entry.id).as_deref() != Some(folder.as_str()) { continue; }
                                                     let selected = self.selected_id == Some(entry.id);
-                                                    texture_row(ui, entry, selected, solid_of(entry.id), Some(folder.as_str()), &folders, &mut intent);
+                                                    let label = label_of(entry);
+                                                    texture_row(ui, entry, &label, selected, solid_of(entry.id), Some(folder.as_str()), &folders, &mut intent);
                                                 }
                                             });
                                     }
@@ -1075,7 +1035,8 @@ impl GameContext for EditorContext {
                                         if entry.id == 0 { continue; }
                                         if folder_of(entry.id).is_some() { continue; }
                                         let selected = self.selected_id == Some(entry.id);
-                                        texture_row(ui, entry, selected, solid_of(entry.id), None, &folders, &mut intent);
+                                        let label = label_of(entry);
+                                        texture_row(ui, entry, &label, selected, solid_of(entry.id), None, &folders, &mut intent);
                                     }
                                 });
                             }
@@ -1091,13 +1052,28 @@ impl GameContext for EditorContext {
                             }
                             RightPanelTab::CharacterSpawner => {
                                 if !spawner_form_open {
+                                    // Pinned "Player Spawn" brush at the top — singleton across
+                                    // the whole map, shown as a green tag here and an "S" marker
+                                    // on the editor map. Indicator (set) / (unset) tells the user
+                                    // whether a spawn has been placed for the current map.
+                                    let spawn_active = spawner_brush == SpawnerBrush::PlayerSpawn;
+                                    let spawn_label = if self.world.spawn.is_some() {
+                                        "Player Spawn (set)"
+                                    } else {
+                                        "Player Spawn (unset)"
+                                    };
+                                    if ui.selectable_label(spawn_active, spawn_label).clicked() {
+                                        intent.new_spawner_brush = Some(SpawnerBrush::PlayerSpawn);
+                                    }
+                                    ui.separator();
+
                                     // Unit template list — click a row to select as brush
                                     egui::ScrollArea::vertical()
                                         .id_salt("spawner_list")
                                         .max_height(200.0)
                                         .show(ui, |ui| {
                                             for (i, unit) in self.spawner_units.iter().enumerate() {
-                                                let is_selected = selected_spawner_id == Some(unit.id);
+                                                let is_selected = matches!(spawner_brush, SpawnerBrush::Unit(id) if id == unit.id);
                                                 let label = format!(
                                                     "{} ({})",
                                                     if unit.name.is_empty() { "(unnamed)" } else { &unit.name },
@@ -1105,7 +1081,7 @@ impl GameContext for EditorContext {
                                                 );
                                                 ui.horizontal(|ui| {
                                                     if ui.selectable_label(is_selected, &label).clicked() {
-                                                        intent.new_selected_spawner = Some(unit.id);
+                                                        intent.new_spawner_brush = Some(SpawnerBrush::Unit(unit.id));
                                                     }
                                                     if ui.small_button("Edit").clicked() {
                                                         intent.spawner_form = Some(SpawnerFormAction::OpenEdit(i));
@@ -1127,7 +1103,12 @@ impl GameContext for EditorContext {
                                     ui.label("Name:");
                                     ui.text_edit_singleline(&mut draft_name);
                                     ui.add_space(6.0);
-                                    ui.label("Sprite:");
+                                    ui.horizontal(|ui| {
+                                        ui.label("Sprite:");
+                                        if ui.small_button("+ Add PNG").clicked() {
+                                            intent.add_unit_sprite_png = true;
+                                        }
+                                    });
                                     egui::ScrollArea::vertical()
                                         .id_salt("spawner_sprite")
                                         .max_height(120.0)
@@ -1260,6 +1241,27 @@ impl GameContext for EditorContext {
                     );
                 }
 
+                // Player-spawn marker — bright yellow tile with an "S" label,
+                // distinct from the green patrol nodes.
+                if let Some(rect) = spawn_marker {
+                    painter.rect_filled(
+                        rect, 2.0,
+                        egui::Color32::from_rgba_unmultiplied(255, 210, 50, 170),
+                    );
+                    painter.rect_stroke(
+                        rect, 2.0,
+                        egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 230, 90)),
+                        egui::StrokeKind::Outside,
+                    );
+                    painter.text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "S",
+                        egui::FontId::proportional(16.0),
+                        egui::Color32::from_rgb(40, 30, 10),
+                    );
+                }
+
                 // Paint input: held for texture/physics, single press for spawner/patrol.
                 let (primary_down, primary_pressed, secondary_pressed, secondary_down, pointer_pos, esc,
                      scroll_y, mid_down, mid_delta) =
@@ -1305,7 +1307,7 @@ impl GameContext for EditorContext {
         self.handle_unit_clicks(active_tab, &intent, h, camera);
         self.handle_patrol(&intent, h, camera);
         self.handle_spawner(&intent, draft_name, draft_health, draft_speed);
-        self.handle_tex(&intent, rename_text);
+        self.handle_add_unit_sprite_png(&intent);
         self.handle_folders(&intent, folder_text);
         self.handle_resize(&intent, resize_draft_w, resize_draft_h);
         self.handle_camera(engine, &intent, h);
