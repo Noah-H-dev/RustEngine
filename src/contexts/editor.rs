@@ -64,7 +64,7 @@ use RustEngine::tools::{load_textures, GLObject, BL_RECTANGLE};
 use RustEngine::shaders::{VERT_SHADER, FRAG_SHADER};
 use std::collections::HashMap;
 use super::menus::MainMenuContext;
-use super::tiledefs::TileDefs;
+use super::tiledefs::{Category, TileDefs};
 use super::tileset::Tileset;
 
 // ── Editor ─────────────────────────────────────────────────────────────────────
@@ -191,13 +191,18 @@ enum SpawnerBrush {
 struct UnitDraft {
     name: String,
     sprite_id: Option<i32>,
+    /// True when `sprite_id` points at a creature def freshly minted by this
+    /// form's "+ Add PNG". Such a def is owned by the unit, so its name is
+    /// synced to the unit's final name on Confirm. Cleared when the user picks
+    /// an existing sprite instead (we never rename a sprite we didn't create).
+    sprite_def_is_new: bool,
     health: i64,
     speed: f64,
 }
 
 impl UnitDraft {
     fn new() -> Self {
-        UnitDraft { name: String::new(), sprite_id: None, health: 1, speed: 1.0 }
+        UnitDraft { name: String::new(), sprite_id: None, sprite_def_is_new: false, health: 1, speed: 1.0 }
     }
 }
 
@@ -556,7 +561,11 @@ impl EditorContext {
             self.spawner_draft.name   = draft_name;
             self.spawner_draft.health = draft_health;
             self.spawner_draft.speed  = draft_speed;
-            if let Some(s) = intent.new_draft_sprite { self.spawner_draft.sprite_id = Some(s); }
+            if let Some(s) = intent.new_draft_sprite {
+                self.spawner_draft.sprite_id = Some(s);
+                // User picked an existing sprite — not one we own, so don't rename it.
+                self.spawner_draft.sprite_def_is_new = false;
+            }
         }
         if let Some(b) = intent.new_spawner_brush { self.spawner_brush = b; }
         if let Some(del_id) = intent.delete_spawner_id {
@@ -585,6 +594,7 @@ impl EditorContext {
                 self.spawner_draft = UnitDraft {
                     name:      record.name.clone(),
                     sprite_id: record.sprite_id,
+                    sprite_def_is_new: false,
                     health:    h,
                     speed:     s,
                 };
@@ -615,6 +625,15 @@ impl EditorContext {
                     SpawnerMode::Idle | SpawnerMode::PatrolPainting { .. } => {}
                 }
                 self.save_units();
+                // If this unit owns a freshly-added creature sprite, name that
+                // def after the finished unit so the two stay in sync.
+                if self.spawner_draft.sprite_def_is_new {
+                    if let Some(sid) = self.spawner_draft.sprite_id {
+                        let name = self.spawner_draft.name.trim();
+                        self.tile_defs.set_name(sid, if name.is_empty() { None } else { Some(name.to_string()) });
+                        self.tile_defs.save();
+                    }
+                }
                 self.spawner_mode  = SpawnerMode::Idle;
                 self.spawner_draft = UnitDraft::new();
             }
@@ -622,13 +641,15 @@ impl EditorContext {
     }
 
     /// "+ Add PNG" from the spawner unit form: pick a PNG via rfd, copy it into
-    /// `assets/` if needed, allocate a new abstract tile id (naming it after
-    /// the unit being edited if a draft name is set), assign the PNG in the
-    /// active tileset, reload the palette so the new entry shows up
-    /// immediately, and select it as the draft unit's sprite. This is the
-    /// "thin shortcut that delegates to central allocation" mentioned in the
-    /// architecture memory — the alloc goes through `TileDefs::create`. Must
-    /// be dispatched AFTER `handle_spawner` so `spawner_draft.name` is fresh.
+    /// `assets/` if needed, allocate a new abstract tile id in the **Creatures**
+    /// category, assign the PNG in the active tileset, reload the palette so the
+    /// new entry shows up immediately, and select it as the draft unit's sprite.
+    /// This is the "thin shortcut that delegates to central allocation" mentioned
+    /// in the architecture memory — the alloc goes through `TileDefs::create`.
+    /// The def's name is seeded from the current draft name but is authoritatively
+    /// (re)synced to the unit's final name when the form is confirmed, so we mark
+    /// it `sprite_def_is_new`. Must be dispatched AFTER `handle_spawner` so
+    /// `spawner_draft.name` is fresh.
     fn handle_add_unit_sprite_png(&mut self, intent: &EditorIntent) {
         if !intent.add_unit_sprite_png { return; }
         let Some(picked) = rfd::FileDialog::new()
@@ -642,14 +663,15 @@ impl EditorContext {
         if !dest.exists() {
             let _ = std::fs::copy(&picked, &dest);
         }
-        // Inherit the unit's name (if any) so the new tile def is identifiable
-        // — e.g. naming a unit "Goblin" before + Add PNG yields a "Goblin" tile.
+        // Seed the def name from the unit's current name (the final name is
+        // synced on Confirm). e.g. naming a unit "Goblin" then + Add PNG yields
+        // a provisional "Goblin" creature def.
         let tile_name = {
             let n = self.spawner_draft.name.trim();
             if n.is_empty() { None } else { Some(n.to_string()) }
         };
-        // Allocate a new abstract tile id, assign the PNG in the loaded tileset.
-        let id = self.tile_defs.create(tile_name);
+        // Allocate a new Creatures-category id, assign the PNG in the loaded tileset.
+        let id = self.tile_defs.create(tile_name, Category::Creatures);
         self.tile_defs.save();
         let mut ts = Tileset::load(&self.id_path);
         ts.set_png(id, Some(filename));
@@ -657,8 +679,10 @@ impl EditorContext {
         // Reload palette + sprite cache so the new entry is immediately visible.
         self.palette           = Self::load_palette(&self.id_path);
         self.unit_sprite_cache = Self::build_sprite_cache(&self.palette);
-        // Auto-select it as the draft unit's sprite.
+        // Auto-select it as the draft unit's sprite — and mark it owned so Confirm
+        // syncs its name.
         self.spawner_draft.sprite_id = Some(id);
+        self.spawner_draft.sprite_def_is_new = true;
     }
 
     /// Apply folder intents: open/confirm/cancel the inline name input, move a
@@ -977,12 +1001,16 @@ impl GameContext for EditorContext {
                                 }
                                 ui.separator();
                                 egui::ScrollArea::vertical().show(ui, |ui| {
+                                    // The tile palette only paints map tiles, so it shows
+                                    // Tiles-category defs only. Creatures/Objects live in the
+                                    // Definitions tab of the tileset editor (and the spawner).
+                                    let is_tile = |id: i32| self.tile_defs.category_of(id) == Category::Tiles;
                                     // Folders are implicit: the sorted set of folder names referenced
-                                    // by any tile in the current palette.
+                                    // by any Tiles-category entry in the current palette.
                                     let folders: Vec<String> = {
                                         let mut set = std::collections::BTreeSet::new();
                                         for e in &self.palette {
-                                            if e.id == 0 { continue; }
+                                            if e.id == 0 || !is_tile(e.id) { continue; }
                                             if let Some(f) = self.tile_defs.folder_of(e.id) {
                                                 set.insert(f);
                                             }
@@ -1021,7 +1049,7 @@ impl GameContext for EditorContext {
                                             })
                                             .body(|ui| {
                                                 for entry in &self.palette {
-                                                    if entry.id == 0 { continue; }
+                                                    if entry.id == 0 || !is_tile(entry.id) { continue; }
                                                     if folder_of(entry.id).as_deref() != Some(folder.as_str()) { continue; }
                                                     let selected = self.selected_id == Some(entry.id);
                                                     let label = label_of(entry);
@@ -1032,7 +1060,7 @@ impl GameContext for EditorContext {
 
                                     // Loose textures (no folder) below the folders.
                                     for entry in &self.palette {
-                                        if entry.id == 0 { continue; }
+                                        if entry.id == 0 || !is_tile(entry.id) { continue; }
                                         if folder_of(entry.id).is_some() { continue; }
                                         let selected = self.selected_id == Some(entry.id);
                                         let label = label_of(entry);
@@ -1113,8 +1141,12 @@ impl GameContext for EditorContext {
                                         .id_salt("spawner_sprite")
                                         .max_height(120.0)
                                         .show(ui, |ui| {
+                                            // Creatures only — units are drawn from creature defs.
+                                            // Move a def to Creatures in the tileset editor to make
+                                            // it selectable here (or use "+ Add PNG" above).
                                             for entry in &self.palette {
                                                 if entry.id == 0 { continue; }
+                                                if self.tile_defs.category_of(entry.id) != Category::Creatures { continue; }
                                                 let selected = draft_sprite == Some(entry.id);
                                                 if ui.selectable_label(selected, entry.display()).clicked() {
                                                     intent.new_draft_sprite = Some(entry.id);

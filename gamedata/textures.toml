@@ -2,18 +2,28 @@
 id = 1
 name = "wall"
 solid = true
+category = "tiles"
 
 [[texture]]
 id = 2
 name = "floor"
 solid = false
+category = "tiles"
 
 [[texture]]
 id = 3
 name = "enemy"
 solid = false
+category = "creatures"
 
 [[texture]]
 id = 4
 name = "player"
 solid = false
+category = "creatures"
+
+[[texture]]
+id = 5
+name = "angry rock"
+solid = false
+category = "creatures"

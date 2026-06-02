@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use RustEngine::game::game_engine::{Engine, GameContext};
 
 use super::menus::MainMenuContext;
-use super::tiledefs::TileDefs;
+use super::tiledefs::{Category, TileDefs};
 use super::tileset::{Tileset, assets_pngs};
 
 #[derive(Clone, Copy, PartialEq)]
@@ -69,6 +69,8 @@ struct Intent {
 
     // Definitions tab
     def_create:             bool,
+    def_new_category:       Option<Category>,        // switch the active Definitions sub-tab
+    def_set_category:       Option<(i32, Category)>, // move a def to another category
     def_toggle_solid:       Option<i32>,
     def_start_rename:       Option<i32>,
     def_start_folder:       Option<i32>,
@@ -92,6 +94,9 @@ pub struct TilesetEditorContext {
     tile_defs:       TileDefs,
     edit:            InlineEdit,
     active_tab:      EditorTab,
+    /// Which category sub-tab is showing in the Definitions tab. New tiles are
+    /// created into this category.
+    def_category:    Category,
     /// Currently selected tileset, if any. None = no tileset picked yet.
     current_tileset: Option<Tileset>,
     pending:         Option<Box<dyn GameContext>>,
@@ -108,6 +113,7 @@ impl TilesetEditorContext {
             tile_defs:       TileDefs::load(),
             edit:            InlineEdit::Idle,
             active_tab:      EditorTab::Definitions,
+            def_category:    Category::Tiles,
             current_tileset: current,
             pending:         None,
         }
@@ -132,10 +138,16 @@ impl TilesetEditorContext {
         if let Some(tab) = intent.new_tab { self.active_tab = tab; }
 
         // ── Definitions tab ──────────────────────────────────────────────────
+        if let Some(cat) = intent.def_new_category { self.def_category = cat; }
         if intent.def_create {
-            let id = self.tile_defs.create(None);
+            // New tiles land in whichever category sub-tab is open.
+            let id = self.tile_defs.create(None, self.def_category);
             self.tile_defs.save();
             self.edit = InlineEdit::DefName { id, buf: String::new() };
+        }
+        if let Some((id, cat)) = intent.def_set_category {
+            self.tile_defs.set_category(id, cat);
+            self.tile_defs.save();
         }
         if let Some(id) = intent.def_toggle_solid {
             let new = !self.tile_defs.solid_of(id);
@@ -265,6 +277,15 @@ fn def_row(ui: &mut egui::Ui, def: &super::tiledefs::TileDef, intent: &mut Inten
                     intent.def_remove_from_folder = Some(def.id);
                     ui.close();
                 }
+                ui.menu_button("Move to category", |ui| {
+                    for cat in Category::ALL {
+                        if cat == def.category { continue; }
+                        if ui.button(cat.label()).clicked() {
+                            intent.def_set_category = Some((def.id, cat));
+                            ui.close();
+                        }
+                    }
+                });
                 ui.separator();
                 if ui.button("Delete").clicked() { intent.def_delete = Some(def.id); ui.close(); }
             });
@@ -332,6 +353,7 @@ impl GameContext for TilesetEditorContext {
 
         let defs         = self.tile_defs.sorted();
         let active_tab   = self.active_tab;
+        let def_category = self.def_category;
         let tileset_name = self.current_tileset.as_ref().map(|t| t.name());
         let tileset_path = self.current_tileset.as_ref().map(|t| t.path.clone());
         let tileset_list = Tileset::list_in_dir();
@@ -367,9 +389,17 @@ impl GameContext for TilesetEditorContext {
                     // Per-tab toolbar action.
                     match active_tab {
                         EditorTab::Definitions => {
+                            // Category sub-tabs — Tiles / Creatures / Objects.
+                            for cat in Category::ALL {
+                                if ui.selectable_label(def_category == cat, cat.label()).clicked() {
+                                    intent.def_new_category = Some(cat);
+                                }
+                            }
+                            ui.separator();
                             if ui.button("+ New Tile").clicked() { intent.def_create = true; }
                             ui.separator();
-                            ui.label(format!("{} tiles", defs.len()));
+                            let count = defs.iter().filter(|d| d.category == def_category).count();
+                            ui.label(format!("{} in {}", count, def_category.label()));
                         }
                         EditorTab::Tileset => {
                             let label = match &tileset_name {
@@ -418,13 +448,18 @@ impl GameContext for TilesetEditorContext {
 
                 match active_tab {
                     EditorTab::Definitions => {
-                        if defs.is_empty() {
+                        let in_category: Vec<&super::tiledefs::TileDef> =
+                            defs.iter().filter(|d| d.category == def_category).collect();
+                        if in_category.is_empty() {
                             ui.add_space(12.0);
-                            ui.weak("No tiles yet - click \"+ New Tile\" to define one.");
+                            ui.weak(format!(
+                                "No {} yet - click \"+ New Tile\" to define one.",
+                                def_category.label().to_lowercase(),
+                            ));
                             return;
                         }
                         egui::ScrollArea::vertical().show(ui, |ui| {
-                            for def in &defs {
+                            for def in &in_category {
                                 def_row(ui, def, &mut intent);
                             }
                         });

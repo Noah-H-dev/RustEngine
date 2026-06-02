@@ -5,15 +5,11 @@ use RustEngine::game::game_engine::Engine;
 
 //Zincident Software
 /* Notes
-Clean up UI make it more useable - kinda done
-add a settings menu (persistant across all contexts) - Yep
-add panning and zooming to the level editor YAY!
-add tile and physics painter combination YAY!
-make levels resizeable from within the editor \ done
-abstract the GUI further to make it easier to use \ yep
 start thinking about stats and game logic - stats are there!
 Bundled objects, dont allow base tile painting anymore. struct with vec of tilecoords, drawn from bottom left to top right but all holds 1 id. \ Maybe not
 interactables? another layer? propperties of tiles in the tileset? (I prefer the second)
+interactables first (an enum? probably a struct with a lot of fields, which then in a UI draw loop if interact__pressed for type in interact_menu, then combat interaction
+
  */
 
 // ── Planned features deliberately deferred ──────────────────────────────────

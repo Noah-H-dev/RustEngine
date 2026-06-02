@@ -3,8 +3,19 @@ id = 1
 name = "enemy"
 sprite_id = 3
 positions = [[8, 8]]
-patrols = [[[8, 7], [6, 2], [9, 2]]]
+patrols = [[[8, 8], [5, 3], [9, 2]]]
 
 [unit.stats]
 health = 1
 speed = 0.1
+
+[[unit]]
+id = 2
+name = "angry rock"
+sprite_id = 5
+positions = [[5, 10]]
+patrols = [[[8, 12], [10, 7], [5, 10]]]
+
+[unit.stats]
+health = 1
+speed = 1.0

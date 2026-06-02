@@ -22,18 +22,51 @@ use serde::{Deserialize, Serialize};
 /// editor; both must use this same model so neither drops the other's fields.
 pub const TILEDEFS_PATH: &str = "gamedata/textures.toml";
 
+/// Top-level category a definition belongs to. This is the *kind* of thing the
+/// def is, distinct from `folder` (an organizational subgrouping within a
+/// category). The tileset editor's Definitions view has one tab per category;
+/// the map editor uses it to decide which list a def shows up in (tile palette
+/// vs spawner sprite picker). Old `textures.toml` files without this field load
+/// as `Tiles`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Category {
+    #[default]
+    Tiles,
+    Creatures,
+    Objects,
+}
+
+impl Category {
+    /// All categories in display order — drives the Definitions tab bar.
+    pub const ALL: [Category; 3] = [Category::Tiles, Category::Creatures, Category::Objects];
+
+    /// Human label for the tab/menu.
+    pub fn label(self) -> &'static str {
+        match self {
+            Category::Tiles     => "Tiles",
+            Category::Creatures => "Creatures",
+            Category::Objects   => "Objects",
+        }
+    }
+}
+
 /// One abstract tile definition. Properties here are shared across all tilesets.
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct TileDef {
     pub id: i32,
-    /// Human-readable name (e.g. "stone wall"). None = unnamed.
     #[serde(default)]
     pub name: Option<String>,
-    /// Default collision stamped onto tiles painted with this id.
     #[serde(default)]
     pub solid: bool,
+    /// Top-level category (Tiles / Creatures / Objects). Defaults to Tiles for
+    /// back-compat with files written before categories existed.
+    #[serde(default)]
+    pub category: Category,
     /// Organizational folder this tile lives in. None = loose. Folders are
-    /// implicit: one exists exactly while ≥1 tile references it.
+    /// implicit: one exists exactly while ≥1 tile references it. Scoped within a
+    /// category, not across — the map editor only ever shows Tiles-category
+    /// folders.
     #[serde(default)]
     pub folder: Option<String>,
 }
@@ -93,6 +126,12 @@ impl TileDefs {
         self.map.get(&id).and_then(|t| t.folder.clone())
     }
 
+    /// Category `id` belongs to (Tiles if no definition exists — matches the
+    /// serde default so undefined ids behave like freshly-created tiles).
+    pub fn category_of(&self, id: i32) -> Category {
+        self.map.get(&id).map(|t| t.category).unwrap_or_default()
+    }
+
     /// Human name for `id`, if any.
     pub fn name_of(&self, id: i32) -> Option<String> {
         self.map.get(&id).and_then(|t| t.name.clone())
@@ -129,6 +168,16 @@ impl TileDefs {
         self.entry_mut(id).folder = folder;
     }
 
+    /// Move a definition to another category. Clears its folder, since folders
+    /// are scoped within a category and wouldn't make sense carried across.
+    pub fn set_category(&mut self, id: i32, category: Category) {
+        let e = self.entry_mut(id);
+        if e.category != category {
+            e.category = category;
+            e.folder = None;
+        }
+    }
+
     pub fn set_name(&mut self, id: i32, name: Option<String>) {
         self.entry_mut(id).name = name;
     }
@@ -160,11 +209,11 @@ impl TileDefs {
     }
 
     /// Allocate the next abstract id (max + 1, ids start at 1) and insert a new
-    /// definition with the given name. Returns the new id. This is the central
-    /// id-allocation point the tileset editor owns.
-    pub fn create(&mut self, name: Option<String>) -> i32 {
+    /// definition with the given name and category. Returns the new id. This is
+    /// the central id-allocation point the tileset editor owns.
+    pub fn create(&mut self, name: Option<String>, category: Category) -> i32 {
         let id = self.map.keys().copied().max().unwrap_or(0) + 1;
-        self.map.insert(id, TileDef { id, name, solid: false, folder: None });
+        self.map.insert(id, TileDef { id, name, solid: false, category, folder: None });
         id
     }
 

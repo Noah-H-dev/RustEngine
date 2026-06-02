@@ -1,0 +1,39 @@
+
+
+pub enum Interaction{
+    NONE,
+    INTERACTABLE {interact_type}
+}
+
+pub struct interact_type{
+    grab: bool,
+    push: bool,
+    throw: bool,
+    drop: bool
+}
+
+
+rock{
+    .
+    .
+    .
+    .
+    interact: interactable
+}
+
+if SDL_KEY == KEY_E{
+    SDL_GET_KEY{
+        match SDL_KEY{
+            if KEY_UP{
+                tile above
+            }
+            .
+            .
+            .
+            .
+            .
+        }
+    }
+
+}
+tile_above.

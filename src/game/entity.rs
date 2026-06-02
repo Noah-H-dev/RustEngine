@@ -4,8 +4,8 @@ use super::game_engine::World;
 use std::collections::{BinaryHeap, HashMap};
 use std::cmp::Reverse;
 use super::stats::stats;
-use serde::Deserialize;
-
+use serde::{Deserialize, Serialize};
+use crate::game::item::item;
 // ── Player loader ────────────────────────────────────────────────────────────
 //
 // Reads `player.toml` into a `Unit` ready to drop into the engine. The on-disk
@@ -78,12 +78,13 @@ pub struct Unit {
     pub size: f32,
     pub stats: stats,
     pub action_time:f64,
+    pub inventory: Vec<item>,
     sprite: GLObject,
 
 }
 impl Unit {
     pub fn new(position: (i32,i32),target_position: (i32,i32), sprite:GLObject) -> Unit {
-        return Unit {position,target_position,size: 1.0, patrol: vec!(),patrol_idx:0, path: vec!(), stats:stats::new(1,1.0),action_time: 0.0, sprite}
+        return Unit {position,target_position,size: 1.0, patrol: vec!(),patrol_idx:0, path: vec!(), stats:stats::new(1,1.0),action_time: 0.0,inventory:Vec::new(), sprite}
     }
     pub fn draw(&self, camera: (i32, i32)){
         use super::game_engine::TILE_SIZE;
@@ -191,4 +192,3 @@ impl Unit {
         self.path = vec![]; // no path found
     }
 }
-

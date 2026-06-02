@@ -119,7 +119,6 @@ impl GameContext for MainMenuContext {
                     if ui.add_sized([160.0, 40.0], egui::Button::new("Run").fill(game_fill)).clicked() {
                         toggle_game = true;
                     }
-
                     if self.game_sub.is_visible() {
                         ui.add_space(4.0);
                         if let GameSub::Open { map_path } = &mut self.game_sub {
@@ -177,7 +176,7 @@ impl GameContext for MainMenuContext {
                     }
 
                     // ── File form (shown below when Open or New is active) ──
-                    ui.add_space(12.0);
+                    ui.add_space(8.0);
                     match &mut self.editor_sub {
                         EditorSub::Open { map_path } => {
                             ui.horizontal(|ui| {
@@ -213,7 +212,7 @@ impl GameContext for MainMenuContext {
                     }
 
                     // ── Tileset editor ──
-                    ui.add_space(8.0);
+                    //ui.add_space(8.0);
                     if ui.add_sized([160.0, 40.0], egui::Button::new("Tileset")).clicked() {
                         go_tileset = true;
                     }

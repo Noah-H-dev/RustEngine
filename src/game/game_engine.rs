@@ -6,6 +6,7 @@ use crate::tools::*;
 use crate::gui::EguiRenderer;
 use crate::shaders::{FRAG_SHADER, TRANS_FRAG_SHADER, VERT_SHADER};
 use serde::{Deserialize, Serialize};
+use crate::game::item::item;
 
 pub const TILE_SIZE: i32 = 32;
 /// Persisted unit template, written to / read from units.toml.
@@ -112,22 +113,17 @@ pub trait GameContext {
 
 // ── Engine ─────────────────────────────────────────────────────────────────────
 pub struct Engine {
-    // Fields holding GL resources must come before `win` so they are dropped
-    // (and their glDelete* calls issued) while the GL context is still alive.
     pub renderer: EguiRenderer,
     pub player: Unit,
     pub units: Vec<Unit>,
+    pub items: Vec<item>,
     pub world: World,
-    // GlWindow must be declared before Sdl — Rust drops fields in declaration
-    // order, and the window must be destroyed before the SDL context.
     win: GlWindow,
     sdl: Sdl,
     pub win_open: bool,
     pub current_action: actions,
     pub egui_input: egui::RawInput,
     pub mouse_pos: egui::Pos2,
-    /// World-space offset of the bottom-left corner of the screen.
-    /// (0, 0) means the world origin is at the bottom-left of the screen.
     pub camera: (i32, i32),
     pub settings: Settings,
 }
@@ -162,6 +158,7 @@ impl Engine {
             egui_input: egui::RawInput::default(),
             mouse_pos: egui::Pos2::default(),
             units: Vec::new(),
+            items: vec![],//update this
             world: World::new_empty(0, 0),
             camera: (0, 0),
             settings,

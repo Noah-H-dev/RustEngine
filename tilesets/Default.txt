@@ -2,3 +2,4 @@
 2 Floor.png
 3 Enemy.png
 4 player.png
+5 Rock.png
