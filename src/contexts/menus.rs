@@ -1,21 +1,21 @@
 use std::path::{Path, PathBuf};
 
-use RustEngine::game::game_engine::{Engine, GameContext, TILE_SIZE};
+use RustEngine::game::game_engine::{Engine, GameContext};
 
-use super::editor::EditorContext;
+use super::editor_menu::EditorMenuContext;
 use super::game::GameRunningContext;
 use super::settings::SettingsContext;
 use super::tileset::ensure_default;
-use super::tileset_editor::TilesetEditorContext;
 
 /// Directory all map files are looked up in. Relative paths typed into the
 /// menu are resolved under this folder; absolute paths or paths that already
 /// start with this folder are used verbatim (escape hatch for power users).
-const MAPS_DIR: &str = "maps";
+pub(crate) const MAPS_DIR: &str = "maps";
 
 /// Resolve a user-entered map path against `MAPS_DIR`. Absolute paths and
-/// paths already rooted in `maps/` pass through unchanged.
-fn resolve_map_path(s: &str) -> String {
+/// paths already rooted in `maps/` pass through unchanged. Shared with the
+/// editor hub, which hosts the map-editor Open/New flow.
+pub(crate) fn resolve_map_path(s: &str) -> String {
     let p = Path::new(s);
     if p.is_absolute() || p.starts_with(MAPS_DIR) {
         s.to_string()
@@ -34,35 +34,14 @@ impl GameSub {
     fn is_visible(&self) -> bool { !matches!(self, GameSub::Hidden) }
 }
 
-// ── Editor sub-menu state (owned by MainMenuContext) ───────────────────────────
-// The tileset (id->png file) is no longer asked here — it's a global setting
-// (`Settings.active_tileset`), edited in Settings -> Game -> Tileset.
-enum EditorSub {
-    Hidden,
-    Open { map_path: String },
-    New  { map_path: String, width: String, height: String },
-}
-
-impl EditorSub {
-    fn is_visible(&self) -> bool { !matches!(self, EditorSub::Hidden) }
-    fn is_open(&self)    -> bool { matches!(self, EditorSub::Open { .. }) }
-    fn is_new(&self)     -> bool { matches!(self, EditorSub::New  { .. }) }
-
-    /// Preserve the map path the user has already typed when switching sub-forms.
-    fn current_map_path(&self) -> String {
-        match self {
-            EditorSub::Open { map_path } |
-            EditorSub::New  { map_path, .. } => map_path.clone(),
-            EditorSub::Hidden => "map.txt".into(),
-        }
-    }
-}
-
 // ── Main menu ──────────────────────────────────────────────────────────────────
+// Top-level entry point. "Run" launches gameplay; "Editor" opens the editor hub
+// (EditorMenuContext), which in turn hosts the map editor, tileset editor, and
+// game-data editor. The editor sub-screens used to live here directly — they were
+// moved to the hub to keep this menu uncluttered as more editors are added.
 pub struct MainMenuContext {
     pending_transition: Option<Box<dyn GameContext>>,
     game_sub: GameSub,
-    editor_sub: EditorSub,
     error_msg: Option<String>,
 }
 
@@ -76,7 +55,6 @@ impl MainMenuContext {
         MainMenuContext {
             pending_transition: None,
             game_sub: GameSub::Hidden,
-            editor_sub: EditorSub::Hidden,
             error_msg: None,
         }
     }
@@ -91,13 +69,8 @@ impl GameContext for MainMenuContext {
         // Boolean flags written inside the closure, acted on after it returns.
         let mut toggle_game  = false;
         let mut confirm_game = false;
-        let mut toggle_editor = false;
-        let mut show_open    = false;
-        let mut show_new     = false;
-        let mut confirm_open = false;
-        let mut confirm_new  = false;
+        let mut go_editor    = false;
         let mut go_settings  = false;
-        let mut go_tileset   = false;
         let mut quit_app     = false;
 
         let (w, h) = engine.screen_size();
@@ -138,83 +111,9 @@ impl GameContext for MainMenuContext {
                     }
                     ui.add_space(8.0);
 
-                    // ── Editor button (centered) ──
-                    let editor_fill = if self.editor_sub.is_visible() {
-                        egui::Color32::from_rgb(80, 100, 180)
-                    } else {
-                        ui.visuals().widgets.inactive.bg_fill
-                    };
-                    if ui.add_sized([160.0, 40.0], egui::Button::new("Editor").fill(editor_fill)).clicked() {
-                        toggle_editor = true;
-                    }
-
-                    // ── Open File / New File sub-buttons (centered row) ──
-                    if self.editor_sub.is_visible() {
-                        ui.add_space(4.0);
-                        ui.horizontal(|ui| {
-                            let sub_w = 100.0 + 4.0 + 100.0;
-                            let pad = (ui.available_width() - sub_w) / 2.0;
-                            if pad > 0.0 { ui.add_space(pad); }
-                            let open_fill = if self.editor_sub.is_open() {
-                                egui::Color32::from_rgb(50, 130, 50)
-                            } else {
-                                ui.visuals().widgets.inactive.bg_fill
-                            };
-                            if ui.add_sized([100.0, 32.0], egui::Button::new("Open File").fill(open_fill)).clicked() {
-                                show_open = true;
-                            }
-                            ui.add_space(4.0);
-                            let new_fill = if self.editor_sub.is_new() {
-                                egui::Color32::from_rgb(50, 130, 50)
-                            } else {
-                                ui.visuals().widgets.inactive.bg_fill
-                            };
-                            if ui.add_sized([100.0, 32.0], egui::Button::new("New File").fill(new_fill)).clicked() {
-                                show_new = true;
-                            }
-                        });
-                    }
-
-                    // ── File form (shown below when Open or New is active) ──
-                    ui.add_space(8.0);
-                    match &mut self.editor_sub {
-                        EditorSub::Open { map_path } => {
-                            ui.horizontal(|ui| {
-                                let form_w = 280.0;
-                                let pad = (ui.available_width() - form_w) / 2.0;
-                                if pad > 0.0 { ui.add_space(pad); }
-                                ui.vertical(|ui| {
-                                    ui.set_max_width(form_w);
-                                    egui::Grid::new("open_form").num_columns(2).show(ui, |ui| {
-                                        ui.label("Filepath: "); ui.text_edit_singleline(map_path); ui.end_row();
-                                    });
-                                    if ui.button("Open").clicked() { confirm_open = true; }
-                                });
-                            });
-                        }
-                        EditorSub::New { map_path, width, height } => {
-                            ui.horizontal(|ui| {
-                                let form_w = 280.0;
-                                let pad = (ui.available_width() - form_w) / 2.0;
-                                if pad > 0.0 { ui.add_space(pad); }
-                                ui.vertical(|ui| {
-                                    ui.set_max_width(form_w);
-                                    egui::Grid::new("new_form").num_columns(2).show(ui, |ui| {
-                                        ui.label("Map: ");   ui.text_edit_singleline(map_path);                              ui.end_row();
-                                        ui.label("Width:");  ui.add_sized([60.0, 20.0], egui::TextEdit::singleline(width));  ui.end_row();
-                                        ui.label("Height:"); ui.add_sized([60.0, 20.0], egui::TextEdit::singleline(height)); ui.end_row();
-                                    });
-                                    if ui.button("Create").clicked() { confirm_new = true; }
-                                });
-                            });
-                        }
-                        EditorSub::Hidden => {}
-                    }
-
-                    // ── Tileset editor ──
-                    //ui.add_space(8.0);
-                    if ui.add_sized([160.0, 40.0], egui::Button::new("Tileset")).clicked() {
-                        go_tileset = true;
+                    // ── Editor (opens the editor hub) ──
+                    if ui.add_sized([160.0, 40.0], egui::Button::new("Editor")).clicked() {
+                        go_editor = true;
                     }
 
                     // ── Settings ──
@@ -263,66 +162,15 @@ impl GameContext for MainMenuContext {
             }
         }
 
-        if toggle_editor {
+        if go_editor {
             self.error_msg = None;
-            self.editor_sub = if self.editor_sub.is_visible() {
-                EditorSub::Hidden
-            } else {
-                EditorSub::Open { map_path: "map.txt".into() }
-            };
-        }
-
-        if show_open && !self.editor_sub.is_open() {
-            self.error_msg = None;
-            let map_path = self.editor_sub.current_map_path();
-            self.editor_sub = EditorSub::Open { map_path };
-        }
-
-        if show_new && !self.editor_sub.is_new() {
-            self.error_msg = None;
-            let map_path = self.editor_sub.current_map_path();
-            let (sw, sh) = engine.screen_size();
-            let dw = ((sw as i32 + TILE_SIZE - 1) / TILE_SIZE).max(20).to_string();
-            let dh = ((sh as i32 + TILE_SIZE - 1) / TILE_SIZE).max(15).to_string();
-            self.editor_sub = EditorSub::New { map_path, width: dw, height: dh };
-        }
-
-        if confirm_open {
-            if let EditorSub::Open { map_path } = &self.editor_sub {
-                let map = resolve_map_path(map_path);
-                let ids = engine.settings.active_tileset.clone();
-                match EditorContext::from_file(&map, &ids) {
-                    Ok(ctx) => { self.error_msg = None; self.pending_transition = Some(Box::new(ctx)); }
-                    Err(e)  => { self.error_msg = Some(e); }
-                }
-            }
+            self.pending_transition = Some(Box::new(EditorMenuContext::new()));
         }
 
         if go_settings {
             self.pending_transition = Some(Box::new(SettingsContext::from_menu()));
         }
 
-        if go_tileset {
-            self.error_msg = None;
-            let active = engine.settings.active_tileset.clone();
-            self.pending_transition = Some(Box::new(TilesetEditorContext::new(active)));
-        }
-
         if quit_app { engine.win_open = false; }
-
-        if confirm_new {
-            if let EditorSub::New { map_path, width, height } = &self.editor_sub {
-                if let (Ok(w), Ok(h)) = (width.parse::<usize>(), height.parse::<usize>()) {
-                    let map = resolve_map_path(map_path);
-                    let ids = engine.settings.active_tileset.clone();
-                    match EditorContext::new_map(&map, &ids, w, h) {
-                        Ok(ctx) => { self.error_msg = None; self.pending_transition = Some(Box::new(ctx)); }
-                        Err(e)  => { self.error_msg = Some(e); }
-                    }
-                } else {
-                    self.error_msg = Some("Width and height must be valid integers.".into());
-                }
-            }
-        }
     }
 }

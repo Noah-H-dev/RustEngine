@@ -1,3 +1,97 @@
+=== FEATURE NOTES (auto-collected from code comments) ===
+
+-- IMPLEMENTED / IN CODE --
+
+Map Editor  [src/contexts/editor.rs]
+  Tile-painting map editor. Right panel has three tabs: Textures (paint tiles
+  from a palette grouped into implicit folders), Physics (paint per-tile
+  solid/passable collision), Spawner (place unit instances + the player spawn).
+  Camera pan/zoom, map resize dialog, grid/border/physics overlays. Built.
+
+Editor Hub  [src/contexts/editor_menu.rs]
+  Landing screen from main menu that groups Map Editor, Tileset Editor, and
+  Game editor. Map open/new-file forms live here. Built.
+
+Tileset Editor  [src/contexts/tileset_editor.rs]
+  Two tabs. Definitions: the abstract tile-id namespace + tileset-independent
+  props (collision, folder, category) -> tiledefs.toml. Tileset: per-skin PNG
+  assignment from assets/ to each id, saved as tilesets/ files; a new tileset
+  starts as a copy of the current one. Active tileset persisted in Settings. Built.
+
+Game-data Editor  [src/contexts/game_editor.rs]
+  Tabbed editor from hub's "Game" button. Creature tab creates/edits/deletes
+  unit templates (name, sprite, stats) -> units.toml, and "+Add PNG" mints a
+  Creatures-category tile def. Items/feats/spells tabs planned. Creature tab built.
+
+Tile Definitions & Categories  [tiledefs.toml via tileset_editor.rs / editor.rs]
+  Abstract tile ids with shared props; categories Tiles/Creatures/Objects;
+  implicit folders organize the palette. Built.
+
+Unit Templates + Placement + Patrols  [src/game/game_engine.rs, editor.rs]
+  Unit templates hold positions[] with a parallel patrols[] (per-instance
+  waypoint lists), stored in units.toml. Spawner tab places instances and
+  paints patrol paths (enter on unit click, Esc to exit). Built.
+
+Per-map Player Spawn  [World::spawn in game_engine.rs, editor.rs spawner tab]
+  ---SPAWN--- marker in the map file; Spawner brush places/clears it (max 1);
+  game positions the player there at launch. Built.
+
+Player Loader  [src/game/entity.rs + player.toml]
+  Reads player.toml ([[unit]] array) into a Unit; sprite resolved via the
+  active tileset. Built. (Multi-player deferred -- loader uses first entry only.)
+
+Turn-based Gameplay / Movement  [src/contexts/game.rs, src/game/entity.rs]
+  Turn-based loop: player gets an action/speed budget per round, A* pathfinding
+  to a target tile, enemies act once the player's budget is spent. Built.
+
+Settings Menu  [src/contexts/settings.rs + Settings struct]
+  Extensible tabbed settings (add a field + one line per setting). Exposes DPI
+  awareness toggle and active-tileset dropdown. Built.
+
+DPI Awareness  [src/lib.rs, src/gui/mod.rs]
+  Per-monitor-v2 DPI on Windows via runtime-resolved SetProcessDpiAwarenessContext
+  + SDL hint (no-op on older Windows / non-Windows) for a crisp pixel font. Built.
+
+UI Font  [src/gui/mod.rs]
+  Embeds the IBM VGA 9x16 (CP437) font engine-wide for all UI text. Built.
+
+Physics Component  [src/game/game_engine.rs]
+  Per-tile physics data; `solid` flag blocks movement. Designed to extend
+  (friction, bounciness, etc.). Solid done; the rest is room-to-grow only.
+
+-- IN PROGRESS / EARLY --
+
+Items & Gear System  [src/game/item.rs + items.toml]
+  ItemRecord (class/mods/actions), load/store to items.toml, GearType enum
+  (HEAD, ...), empty Effects struct. Per-enum-field data structs still TODO;
+  comment notes this is blocked on implementing "attaching" and "turns" first. Early.
+
+Stats / Skills / Characteristics  [src/game/stats.rs]
+  Stats struct exists; comment flags "much work to do, maybe a scaling struct."
+  Early scaffolding.
+
+-- PLANNED / DEFERRED (roadmap, not implemented; see main.rs header) --
+
+Save Button + game.toml  [src/main.rs, src/contexts/game.rs]
+  Snapshot runtime state (last map, player position, future world state) into a
+  top-level game.toml; unlocks resume-on-startup (skip the map picker). Not done.
+
+Persist Player Position to player.toml  [src/game/entity.rs, main.rs]
+  player.toml `spawn` is read/kept but not used at game start (Run always uses
+  the map's ---SPAWN---). Becomes "last known position" when save lands. Not done.
+
+Multi-player Support  [player.toml, src/game/entity.rs]
+  player.toml uses [[unit]] array on purpose, but the loader takes only the
+  first entry today. Not done.
+
+Dev-mode Lock on Definitions Tab  [src/contexts/tileset_editor.rs, main.rs]
+  Lock the abstract-id namespace so end users can't mutate it at runtime. Not done.
+
+Rename tilesets/*.txt -> *.tileset  [main.rs]
+  Self-documenting tileset filenames; needs engine load-path changes + back-compat.
+  Not done. (textures.toml -> tiledefs.toml rename already done.)
+
+==========================================================
 
 
 pub enum Interaction{

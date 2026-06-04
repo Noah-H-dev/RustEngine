@@ -151,7 +151,7 @@ pub mod tools {
     }
 
     pub enum directions{
-        UP,
+        UP ,
         DOWN,
         RIGHT,
         LEFT,

@@ -41,9 +41,9 @@
 // ── Adding a new field / feature to EditorContext ────────────────────────────
 // All runtime state lives in `EditorContext`. Initialise new fields in the
 // single `with_world` constructor (both `from_file` and `new_map` call it).
-// For FSM-style features (e.g. a multi-step dialog), follow the
-// `SpawnerFormAction` pattern: define an action enum, store it in `EditorIntent`,
-// and apply it in a dedicated handler method.
+// For FSM-style features (e.g. a multi-step dialog), follow the `FolderEdit`
+// pattern: define a state enum on `EditorContext`, mirror its text buffer in /
+// out of `EditorIntent`, and apply transitions in a dedicated handler method.
 //
 // ── Persisting new data ───────────────────────────────────────────────────────
 // Map tile data is saved via `World::save` (called when `intent.do_save` is set).
@@ -54,18 +54,15 @@
 //
 // ── Key helpers ───────────────────────────────────────────────────────────────
 //   screen_to_tile_idx  — converts an egui Pos2 into an index into world.tiles
-//   tile_display_name   — controls how palette entries are labelled in the list
 //   build_sprite_cache  — loads GLObjects keyed by palette id for drawing sprites
 // ══════════════════════════════════════════════════════════════════════════════
 
 use RustEngine::game::game_engine::{Engine, GameContext, World, TILE_SIZE, UnitRecord, UnitFile};
-use RustEngine::game::stats::stats;
 use RustEngine::tools::{load_textures, GLObject, BL_RECTANGLE};
 use RustEngine::shaders::{VERT_SHADER, FRAG_SHADER};
 use std::collections::HashMap;
 use super::menus::MainMenuContext;
 use super::tiledefs::{Category, TileDefs};
-use super::tileset::Tileset;
 
 // ── Editor ─────────────────────────────────────────────────────────────────────
 
@@ -76,22 +73,11 @@ enum RightPanelTab {
     CharacterSpawner,
 }
 
-/// Tile palette entry. The display string is built by `tile_display_name` —
-/// change that one function to reformat how tiles appear in the list.
+/// Tile palette entry. Rows are labelled by `label_of` in the Textures panel
+/// (prefers the tile-def name, falls back to the PNG filename).
 struct PaletteEntry {
     id: i32,
     path: String,
-}
-
-impl PaletteEntry {
-    fn display(&self) -> String {
-        tile_display_name(self.id, &self.path)
-    }
-}
-
-/// Change this to alter how tiles are labelled in the palette panel.
-fn tile_display_name(id: i32, path: &str) -> String {
-    format!("{} | {}", id, path)
 }
 
 /// Render one texture row in the palette: a selectable label (caller composes
@@ -162,19 +148,15 @@ enum FolderEdit {
 }
 
 // ── Spawner FSM ──────────────────────────────────────────────────────────────
-// State lives in EditorContext::spawner_mode; form actions are emitted by the
-// right-panel UI and applied in handle_spawner. PatrolPainting is entered from
-// a map click (handle_unit_clicks) and exited via Esc (handle_patrol).
+// The Spawner tab *places* unit templates onto the map — it no longer creates
+// or edits them (that moved to the Game editor's Creature tab). State lives in
+// EditorContext::spawner_mode. PatrolPainting is entered from a map click
+// (handle_unit_clicks) and exited via Esc (handle_patrol).
 
 enum SpawnerMode {
     Idle,
-    CreatingNew,
-    Editing { index: usize },
     PatrolPainting { unit_id: u32, instance_idx: usize },
 }
-
-#[derive(Clone, Copy)]
-enum SpawnerFormAction { OpenCreate, OpenEdit(usize), Confirm, Cancel }
 
 /// What's selected as the spawner-tab brush. `Unit(id)` paints unit instances
 /// (existing behavior). `PlayerSpawn` paints / clears the per-map player
@@ -184,26 +166,6 @@ enum SpawnerBrush {
     None,
     Unit(u32),
     PlayerSpawn,
-}
-
-/// Ephemeral editor state while creating or editing a Unit — never serialized.
-#[derive(Clone)]
-struct UnitDraft {
-    name: String,
-    sprite_id: Option<i32>,
-    /// True when `sprite_id` points at a creature def freshly minted by this
-    /// form's "+ Add PNG". Such a def is owned by the unit, so its name is
-    /// synced to the unit's final name on Confirm. Cleared when the user picks
-    /// an existing sprite instead (we never rename a sprite we didn't create).
-    sprite_def_is_new: bool,
-    health: i64,
-    speed: f64,
-}
-
-impl UnitDraft {
-    fn new() -> Self {
-        UnitDraft { name: String::new(), sprite_id: None, sprite_def_is_new: false, health: 1, speed: 1.0 }
-    }
 }
 
 /// All UI intents collected during one `draw` call. The egui closure writes
@@ -227,14 +189,8 @@ struct EditorIntent {
     patrol_click_pos: Option<egui::Pos2>,
     patrol_erase_pos: Option<egui::Pos2>,
     patrol_esc:       bool,
-    // Spawner panel
-    spawner_form:         Option<SpawnerFormAction>,
+    // Spawner panel — placement only (creation lives in the Game editor).
     new_spawner_brush:    Option<SpawnerBrush>,
-    delete_spawner_id:    Option<u32>,
-    new_draft_sprite:     Option<i32>,
-    /// Open file dialog to pick a PNG, register it as a new tile, and select
-    /// it as the draft unit's sprite.
-    add_unit_sprite_png:  bool,
     // Set a texture's default collision: (texture id, solid).
     set_texture_solid: Option<(i32, bool)>,
     // Folder management
@@ -267,11 +223,7 @@ pub struct EditorContext {
     /// Physics painter brush: true = paint solid, false = paint passable.
     physics_brush_solid: bool,
     right_panel_open: bool,
-    /// Path of the tileset (id->png file) this editor session opened with.
-    /// Used to write back when adding a unit-sprite PNG and to reload the palette.
-    id_path: String,
     spawner_mode: SpawnerMode,
-    spawner_draft: UnitDraft,
     spawner_units: Vec<UnitRecord>,
     /// Active brush for the Spawner tab — a unit template, the player-spawn
     /// marker, or nothing selected.
@@ -322,9 +274,7 @@ impl EditorContext {
             active_tab: RightPanelTab::TexturePalette,
             physics_brush_solid: true,
             right_panel_open: true,
-            id_path: id_path.to_string(),
             spawner_mode: SpawnerMode::Idle,
-            spawner_draft: UnitDraft::new(),
             spawner_units: Self::load_units(),
             spawner_brush: SpawnerBrush::None,
             unit_sprite_cache,
@@ -555,134 +505,11 @@ impl EditorContext {
         }
     }
 
-    fn handle_spawner(&mut self, intent: &EditorIntent, draft_name: String, draft_health: i64, draft_speed: f64) {
-        // Mirror draft edits back into self while the form is open.
-        if matches!(self.spawner_mode, SpawnerMode::CreatingNew | SpawnerMode::Editing { .. }) {
-            self.spawner_draft.name   = draft_name;
-            self.spawner_draft.health = draft_health;
-            self.spawner_draft.speed  = draft_speed;
-            if let Some(s) = intent.new_draft_sprite {
-                self.spawner_draft.sprite_id = Some(s);
-                // User picked an existing sprite — not one we own, so don't rename it.
-                self.spawner_draft.sprite_def_is_new = false;
-            }
-        }
+    /// Spawner tab is placement-only now: the only template-level action here is
+    /// choosing which brush (a unit template or the player-spawn marker) is
+    /// active. Creating / editing / deleting templates lives in the Game editor.
+    fn handle_spawner(&mut self, intent: &EditorIntent) {
         if let Some(b) = intent.new_spawner_brush { self.spawner_brush = b; }
-        if let Some(del_id) = intent.delete_spawner_id {
-            self.spawner_units.retain(|u| u.id != del_id);
-            // If the deleted unit was the active brush, drop back to None so the
-            // brush doesn't dangle on a non-existent template.
-            if matches!(self.spawner_brush, SpawnerBrush::Unit(id) if id == del_id) {
-                self.spawner_brush = SpawnerBrush::None;
-            }
-            // Defensive: if a future code path lets you delete while patrol-painting
-            // that unit, drop back to Idle so we're not pointing at a dead instance.
-            if let SpawnerMode::PatrolPainting { unit_id, .. } = self.spawner_mode {
-                if unit_id == del_id { self.spawner_mode = SpawnerMode::Idle; }
-            }
-            self.save_units();
-        }
-        let Some(action) = intent.spawner_form else { return; };
-        match action {
-            SpawnerFormAction::OpenCreate => {
-                self.spawner_mode  = SpawnerMode::CreatingNew;
-                self.spawner_draft = UnitDraft::new();
-            }
-            SpawnerFormAction::OpenEdit(idx) => {
-                let record = &self.spawner_units[idx];
-                let (h, s) = record.stats.as_ref().map(|st| (st.health, st.speed)).unwrap_or((1, 1.0));
-                self.spawner_draft = UnitDraft {
-                    name:      record.name.clone(),
-                    sprite_id: record.sprite_id,
-                    sprite_def_is_new: false,
-                    health:    h,
-                    speed:     s,
-                };
-                self.spawner_mode = SpawnerMode::Editing { index: idx };
-            }
-            SpawnerFormAction::Cancel => {
-                self.spawner_mode  = SpawnerMode::Idle;
-                self.spawner_draft = UnitDraft::new();
-            }
-            SpawnerFormAction::Confirm => {
-                match self.spawner_mode {
-                    SpawnerMode::CreatingNew => {
-                        let new_id = self.spawner_units.iter().map(|u| u.id).max().unwrap_or(0) + 1;
-                        self.spawner_units.push(UnitRecord {
-                            id:        new_id,
-                            name:      self.spawner_draft.name.clone(),
-                            sprite_id: self.spawner_draft.sprite_id,
-                            positions: vec![],
-                            patrols:   vec![],
-                            stats:     Some(stats::new(self.spawner_draft.health, self.spawner_draft.speed)),
-                        });
-                    }
-                    SpawnerMode::Editing { index } => {
-                        self.spawner_units[index].name      = self.spawner_draft.name.clone();
-                        self.spawner_units[index].sprite_id = self.spawner_draft.sprite_id;
-                        self.spawner_units[index].stats     = Some(stats::new(self.spawner_draft.health, self.spawner_draft.speed));
-                    }
-                    SpawnerMode::Idle | SpawnerMode::PatrolPainting { .. } => {}
-                }
-                self.save_units();
-                // If this unit owns a freshly-added creature sprite, name that
-                // def after the finished unit so the two stay in sync.
-                if self.spawner_draft.sprite_def_is_new {
-                    if let Some(sid) = self.spawner_draft.sprite_id {
-                        let name = self.spawner_draft.name.trim();
-                        self.tile_defs.set_name(sid, if name.is_empty() { None } else { Some(name.to_string()) });
-                        self.tile_defs.save();
-                    }
-                }
-                self.spawner_mode  = SpawnerMode::Idle;
-                self.spawner_draft = UnitDraft::new();
-            }
-        }
-    }
-
-    /// "+ Add PNG" from the spawner unit form: pick a PNG via rfd, copy it into
-    /// `assets/` if needed, allocate a new abstract tile id in the **Creatures**
-    /// category, assign the PNG in the active tileset, reload the palette so the
-    /// new entry shows up immediately, and select it as the draft unit's sprite.
-    /// This is the "thin shortcut that delegates to central allocation" mentioned
-    /// in the architecture memory — the alloc goes through `TileDefs::create`.
-    /// The def's name is seeded from the current draft name but is authoritatively
-    /// (re)synced to the unit's final name when the form is confirmed, so we mark
-    /// it `sprite_def_is_new`. Must be dispatched AFTER `handle_spawner` so
-    /// `spawner_draft.name` is fresh.
-    fn handle_add_unit_sprite_png(&mut self, intent: &EditorIntent) {
-        if !intent.add_unit_sprite_png { return; }
-        let Some(picked) = rfd::FileDialog::new()
-            .add_filter("PNG Image", &["png"])
-            .set_directory("assets")
-            .pick_file() else { return; };
-        let Some(filename) = picked.file_name().map(|n| n.to_string_lossy().into_owned()) else { return; };
-        if filename.is_empty() { return; }
-        // Copy into assets/ if not already there.
-        let dest = std::path::Path::new("assets").join(&filename);
-        if !dest.exists() {
-            let _ = std::fs::copy(&picked, &dest);
-        }
-        // Seed the def name from the unit's current name (the final name is
-        // synced on Confirm). e.g. naming a unit "Goblin" then + Add PNG yields
-        // a provisional "Goblin" creature def.
-        let tile_name = {
-            let n = self.spawner_draft.name.trim();
-            if n.is_empty() { None } else { Some(n.to_string()) }
-        };
-        // Allocate a new Creatures-category id, assign the PNG in the loaded tileset.
-        let id = self.tile_defs.create(tile_name, Category::Creatures);
-        self.tile_defs.save();
-        let mut ts = Tileset::load(&self.id_path);
-        ts.set_png(id, Some(filename));
-        ts.save();
-        // Reload palette + sprite cache so the new entry is immediately visible.
-        self.palette           = Self::load_palette(&self.id_path);
-        self.unit_sprite_cache = Self::build_sprite_cache(&self.palette);
-        // Auto-select it as the draft unit's sprite — and mark it owned so Confirm
-        // syncs its name.
-        self.spawner_draft.sprite_id = Some(id);
-        self.spawner_draft.sprite_def_is_new = true;
     }
 
     /// Apply folder intents: open/confirm/cancel the inline name input, move a
@@ -836,8 +663,6 @@ impl GameContext for EditorContext {
             FolderEdit::Renaming  { to, .. }   => to.clone(),
             FolderEdit::Idle                   => String::new(),
         };
-        let spawner_form_open  = matches!(self.spawner_mode, SpawnerMode::CreatingNew | SpawnerMode::Editing { .. });
-        let spawner_is_editing = matches!(self.spawner_mode, SpawnerMode::Editing { .. });
         let is_patrol_painting = matches!(self.spawner_mode, SpawnerMode::PatrolPainting { .. });
         let patrol_unit_name: String = if let SpawnerMode::PatrolPainting { unit_id, instance_idx } = self.spawner_mode {
             self.spawner_units.iter().find(|u| u.id == unit_id)
@@ -845,10 +670,6 @@ impl GameContext for EditorContext {
                 .unwrap_or_default()
         } else { String::new() };
         let spawner_brush       = self.spawner_brush;
-        let mut draft_name     = self.spawner_draft.name.clone();
-        let draft_sprite       = self.spawner_draft.sprite_id;
-        let mut draft_health   = self.spawner_draft.health;
-        let mut draft_speed    = self.spawner_draft.speed;
 
         let physics_overlay: Vec<(egui::Rect, egui::Color32)> =
             if active_tab == RightPanelTab::PhysicsPainter || active_tab == RightPanelTab::CharacterSpawner {
@@ -1079,100 +900,41 @@ impl GameContext for EditorContext {
                                 ui.label("White = passable");
                             }
                             RightPanelTab::CharacterSpawner => {
-                                if !spawner_form_open {
-                                    // Pinned "Player Spawn" brush at the top — singleton across
-                                    // the whole map, shown as a green tag here and an "S" marker
-                                    // on the editor map. Indicator (set) / (unset) tells the user
-                                    // whether a spawn has been placed for the current map.
-                                    let spawn_active = spawner_brush == SpawnerBrush::PlayerSpawn;
-                                    let spawn_label = if self.world.spawn.is_some() {
-                                        "Player Spawn (set)"
-                                    } else {
-                                        "Player Spawn (unset)"
-                                    };
-                                    if ui.selectable_label(spawn_active, spawn_label).clicked() {
-                                        intent.new_spawner_brush = Some(SpawnerBrush::PlayerSpawn);
-                                    }
-                                    ui.separator();
-
-                                    // Unit template list — click a row to select as brush
-                                    egui::ScrollArea::vertical()
-                                        .id_salt("spawner_list")
-                                        .max_height(200.0)
-                                        .show(ui, |ui| {
-                                            for (i, unit) in self.spawner_units.iter().enumerate() {
-                                                let is_selected = matches!(spawner_brush, SpawnerBrush::Unit(id) if id == unit.id);
-                                                let label = format!(
-                                                    "{} ({})",
-                                                    if unit.name.is_empty() { "(unnamed)" } else { &unit.name },
-                                                    unit.positions.len(),
-                                                );
-                                                ui.horizontal(|ui| {
-                                                    if ui.selectable_label(is_selected, &label).clicked() {
-                                                        intent.new_spawner_brush = Some(SpawnerBrush::Unit(unit.id));
-                                                    }
-                                                    if ui.small_button("Edit").clicked() {
-                                                        intent.spawner_form = Some(SpawnerFormAction::OpenEdit(i));
-                                                    }
-                                                    if ui.small_button("Del").clicked() {
-                                                        intent.delete_spawner_id = Some(unit.id);
-                                                    }
-                                                });
-                                            }
-                                        });
-                                    if !self.spawner_units.is_empty() { ui.separator(); }
-                                    if ui.button("+ Create New").clicked() {
-                                        intent.spawner_form = Some(SpawnerFormAction::OpenCreate);
-                                    }
+                                // Placement only — pick a brush and paint instances on the map.
+                                // Creating / editing creature templates lives in the Game editor.
+                                let spawn_active = spawner_brush == SpawnerBrush::PlayerSpawn;
+                                let spawn_label = if self.world.spawn.is_some() {
+                                    "Player Spawn (set)"
                                 } else {
-                                    // Create / Edit form
-                                    ui.label(if spawner_is_editing { "Edit Unit" } else { "New Unit" });
-                                    ui.separator();
-                                    ui.label("Name:");
-                                    ui.text_edit_singleline(&mut draft_name);
-                                    ui.add_space(6.0);
-                                    ui.horizontal(|ui| {
-                                        ui.label("Sprite:");
-                                        if ui.small_button("+ Add PNG").clicked() {
-                                            intent.add_unit_sprite_png = true;
+                                    "Player Spawn (unset)"
+                                };
+                                if ui.selectable_label(spawn_active, spawn_label).clicked() {
+                                    intent.new_spawner_brush = Some(SpawnerBrush::PlayerSpawn);
+                                }
+                                ui.separator();
+
+                                // Unit template list — click a row to select it as the brush.
+                                egui::ScrollArea::vertical()
+                                    .id_salt("spawner_list")
+                                    .max_height(220.0)
+                                    .show(ui, |ui| {
+                                        for unit in &self.spawner_units {
+                                            let is_selected = matches!(spawner_brush, SpawnerBrush::Unit(id) if id == unit.id);
+                                            let label = format!(
+                                                "{} ({})",
+                                                if unit.name.is_empty() { "(unnamed)" } else { &unit.name },
+                                                unit.positions.len(),
+                                            );
+                                            if ui.selectable_label(is_selected, &label).clicked() {
+                                                intent.new_spawner_brush = Some(SpawnerBrush::Unit(unit.id));
+                                            }
                                         }
                                     });
-                                    egui::ScrollArea::vertical()
-                                        .id_salt("spawner_sprite")
-                                        .max_height(120.0)
-                                        .show(ui, |ui| {
-                                            // Creatures only — units are drawn from creature defs.
-                                            // Move a def to Creatures in the tileset editor to make
-                                            // it selectable here (or use "+ Add PNG" above).
-                                            for entry in &self.palette {
-                                                if entry.id == 0 { continue; }
-                                                if self.tile_defs.category_of(entry.id) != Category::Creatures { continue; }
-                                                let selected = draft_sprite == Some(entry.id);
-                                                if ui.selectable_label(selected, entry.display()).clicked() {
-                                                    intent.new_draft_sprite = Some(entry.id);
-                                                }
-                                            }
-                                        });
-                                    ui.add_space(6.0);
-                                    ui.collapsing("Stats", |ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.label("Health:");
-                                            ui.add(egui::DragValue::new(&mut draft_health).range(0..=i64::MAX));
-                                        });
-                                        ui.horizontal(|ui| {
-                                            ui.label("Speed:");
-                                            ui.add(egui::DragValue::new(&mut draft_speed).range(0.0..=f64::MAX).speed(0.1));
-                                        });
-                                    });
-                                    ui.add_space(2.0);
-                                    ui.collapsing("Feats", |ui| { ui.label("(not yet implemented)"); });
-                                    ui.add_space(8.0);
-                                    let confirm_label = if spawner_is_editing { "Save" } else { "Create" };
-                                    ui.horizontal(|ui| {
-                                        if ui.button(confirm_label).clicked() { intent.spawner_form = Some(SpawnerFormAction::Confirm); }
-                                        if ui.button("Cancel").clicked()      { intent.spawner_form = Some(SpawnerFormAction::Cancel);  }
-                                    });
+                                ui.separator();
+                                if self.spawner_units.is_empty() {
+                                    ui.weak("No creatures defined.");
                                 }
+                                ui.weak("Create creatures in Editor -> Game -> Creature.");
                             }
                         }
                     });
@@ -1338,8 +1100,7 @@ impl GameContext for EditorContext {
         self.handle_paint(active_tab, &intent, h, camera);
         self.handle_unit_clicks(active_tab, &intent, h, camera);
         self.handle_patrol(&intent, h, camera);
-        self.handle_spawner(&intent, draft_name, draft_health, draft_speed);
-        self.handle_add_unit_sprite_png(&intent);
+        self.handle_spawner(&intent);
         self.handle_folders(&intent, folder_text);
         self.handle_resize(&intent, resize_draft_w, resize_draft_h);
         self.handle_camera(engine, &intent, h);

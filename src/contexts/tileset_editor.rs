@@ -4,7 +4,7 @@
 //
 //   * Definitions — the abstract tile namespace. Create / rename / delete tile
 //     ids and edit their tileset-independent properties (collision, folder).
-//     Writes the shared `textures.toml` via `TileDefs`.
+//     Writes the shared `tiledefs.toml` via `TileDefs`.
 //
 //   * Tileset — per-skin PNG assignment. The user picks (or creates) a tileset
 //     file in `tilesets/` and assigns a PNG from `assets/` to each abstract
@@ -25,7 +25,7 @@ use std::path::PathBuf;
 
 use RustEngine::game::game_engine::{Engine, GameContext};
 
-use super::menus::MainMenuContext;
+use super::editor_menu::EditorMenuContext;
 use super::tiledefs::{Category, TileDefs};
 use super::tileset::{Tileset, assets_pngs};
 
@@ -132,7 +132,7 @@ impl TilesetEditorContext {
         }
 
         if intent.back {
-            self.pending = Some(Box::new(MainMenuContext::new()));
+            self.pending = Some(Box::new(EditorMenuContext::new()));
             return;
         }
         if let Some(tab) = intent.new_tab { self.active_tab = tab; }
@@ -374,7 +374,7 @@ impl GameContext for TilesetEditorContext {
             egui::TopBottomPanel::top("tileset_top").show(ctx, |ui| {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    if ui.button("< Menu").clicked() { intent.back = true; }
+                    if ui.button("< Editors").clicked() { intent.back = true; }
                     ui.separator();
 
                     // Tab bar.

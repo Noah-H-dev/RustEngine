@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use crate::game::stats::stats;
 use crate::shaders::{FRAG_SHADER, VERT_SHADER};
 use crate::tools::{load_textures, GLObject, BL_RECTANGLE};
 pub const ITEMS_PATH: &str = "gamedata/items.toml";
@@ -13,7 +14,10 @@ pub struct ItemRecord{
     pub name: String,
     pub position:(i32,i32),
     pub carried: bool,
-    pub id: i32
+    pub id: i32,
+    pub class: item_type,
+    pub mods: stats_mod,
+    pub action_list: Actions,
 }
 pub fn load_items(id_path:&str) -> Vec<item>{
     let mut itemVec: Vec<item> = Vec::new();
@@ -30,7 +34,10 @@ pub fn load_items(id_path:&str) -> Vec<item>{
                 itemRecord.position,
                 itemRecord.carried,
                 GLObject::new(BL_RECTANGLE, &format!("assets/{}", tex_path), VERT_SHADER, FRAG_SHADER),
-                itemRecord.id
+                itemRecord.id,
+                itemRecord.class,
+                itemRecord.mods,
+                itemRecord.action_list
             ));
         }
     }
@@ -44,7 +51,10 @@ pub fn store_items(items: &[item]){
             name: item.name.clone(),
             position: item.position,
             carried: item.carried,
-            id: item.sprite_id
+            id: item.sprite_id,
+            class: item.class.clone(),
+            mods: item.mods.clone(),
+            action_list: item.action_list.clone(),
         });
     }
     let _ = std::fs::create_dir_all("gamedata");
@@ -52,19 +62,106 @@ pub fn store_items(items: &[item]){
         let _ = std::fs::write(ITEMS_PATH, s);
     }
 }
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Effects {
+
+}
+
+//lots of work to be done. give each enum field a personal struct which holds their data
+//im jumping the gun here, I need to impliment attaching and "turns" before I get to this.
+#[derive(Serialize, Deserialize, Default, Clone)]
+pub enum GearType {
+    #[default]
+    HEAD,
+    BODY,
+    FEET,
+    BELT
+}
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Armor {
+    defense: i32,
+    stat_mods: stats_mod,
+    effects: Vec<Effects>
+}
+#[derive(Serialize, Deserialize, Clone)]
+pub enum WeaponType {
+    FIREARM { ft: FirearmType },
+    MELEE { mt: MeleeType },
+}
+#[derive(Serialize, Deserialize, Clone)]
+pub enum MeleeType {
+    SWORD,
+    AXE,
+    HAMMER,
+    SPEAR
+}
+#[derive(Serialize, Deserialize, Clone)]
+pub enum FirearmType {
+    PISTOL,
+    RIFLE,
+    SHOTGUN,
+    MINIGUN,
+    CANNON
+}
+#[derive(Serialize, Deserialize, Clone)]
+pub enum ConsumeableType {
+    TRAP,
+    THROWABLE,
+    FOOD,
+    MEDICAL
+}
+#[derive(Serialize, Deserialize, Clone)]
+pub enum ammo_type{
+    MUSKET {am: ammunition},
+    NineMill {am: ammunition},
+    TwelveGauge {am: ammunition},
+    FiveFiveSix {am: ammunition}
+}
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ammunition{
+    quantity: i32,
+    damage: i32
+}
+
+#[derive(Serialize, Deserialize, Default, Clone)]
+pub enum item_type{
+    WEAPON{wt: WeaponType },
+    GEAR {gt: GearType },
+    CONSUMABLE {ct: ConsumeableType },
+    AMMUNITION{at: ammo_type},
+    KEY,
+    TOOL,
+    VALUABLE,
+    #[default]
+    CHAFF
+}
+#[derive(Serialize, Deserialize, Default, Clone)]
+pub struct stats_mod{
+    mods: stats //just piggybacking stats
+}
+#[derive(Serialize, Deserialize, Default, Clone)]
+pub struct Actions {
+    pub unequip: bool
+}
+
+
 
 pub struct item{
     pub name: String,
     pub position: (i32,i32), //inherit from a field getting added to Unit
-    carried: bool,
-    sprite: GLObject,
-    sprite_id: i32
-    //add effects here, maybe call it a struct mod or something
+    pub carried: bool,
+    pub sprite: GLObject,
+    pub sprite_id: i32,
+    pub class: item_type,
+    pub mods: stats_mod,
+    pub action_list: Actions,
+
+    //add Effects here, maybe call it a struct mod or something
 }
 
 impl item{
-    pub fn new(name: String, position: (i32,i32), carried: bool, sprite: GLObject,sprite_id:i32) -> item {
-        item{name,position,carried,sprite,sprite_id}
+    pub fn new(name: String, position: (i32,i32), carried: bool, sprite: GLObject, sprite_id:i32, class:item_type, mods: stats_mod, action_list: Actions) -> item {
+        item{name,position,carried,sprite,sprite_id, class, mods, action_list}
     }
     pub fn draw(&self, camera: (i32, i32)) {
         use super::game_engine::TILE_SIZE;

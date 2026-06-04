@@ -7,8 +7,7 @@
 // path out of this struct is deliberate — it lets one map be re-skinned by
 // swapping tilesets while the definitions stay constant.
 //
-// Source of truth on disk is `textures.toml` (name kept for now; a rename to
-// something like `tiledefs.toml` is planned). The `[[texture]]` table key is
+// Source of truth on disk is `tiledefs.toml`. The `[[texture]]` table key is
 // preserved for backward compatibility with files the map editor already wrote.
 //
 // ADDING A NEW PROPERTY: add a `#[serde(default)]` field to `TileDef` so old
@@ -20,13 +19,13 @@ use serde::{Deserialize, Serialize};
 
 /// On-disk path for tile definitions. Shared by the map editor and the tileset
 /// editor; both must use this same model so neither drops the other's fields.
-pub const TILEDEFS_PATH: &str = "gamedata/textures.toml";
+pub const TILEDEFS_PATH: &str = "gamedata/tiledefs.toml";
 
 /// Top-level category a definition belongs to. This is the *kind* of thing the
 /// def is, distinct from `folder` (an organizational subgrouping within a
 /// category). The tileset editor's Definitions view has one tab per category;
 /// the map editor uses it to decide which list a def shows up in (tile palette
-/// vs spawner sprite picker). Old `textures.toml` files without this field load
+/// vs spawner sprite picker). Old `tiledefs.toml` files without this field load
 /// as `Tiles`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -86,7 +85,7 @@ pub struct TileDefs {
 }
 
 impl TileDefs {
-    /// Load from `textures.toml`; empty (not an error) if the file is absent.
+    /// Load from `tiledefs.toml`; empty (not an error) if the file is absent.
     pub fn load() -> Self {
         if !std::path::Path::new(TILEDEFS_PATH).exists() {
             return Self::default();
@@ -98,7 +97,7 @@ impl TileDefs {
         TileDefs { map }
     }
 
-    /// Persist to `textures.toml`, sorted by id for stable diffs.
+    /// Persist to `tiledefs.toml`, sorted by id for stable diffs.
     pub fn save(&self) {
         let mut tiles: Vec<TileDef> = self.map.values().cloned().collect();
         tiles.sort_by_key(|t| t.id);

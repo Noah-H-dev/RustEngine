@@ -84,7 +84,7 @@ pub struct Unit {
 }
 impl Unit {
     pub fn new(position: (i32,i32),target_position: (i32,i32), sprite:GLObject) -> Unit {
-        return Unit {position,target_position,size: 1.0, patrol: vec!(),patrol_idx:0, path: vec!(), stats:stats::new(1,1.0),action_time: 0.0,inventory:Vec::new(), sprite}
+        return Unit {position,target_position,size: 1.0, patrol: vec!(),patrol_idx:0, path: vec!(), stats:stats::new(1,1.0, 0.0),action_time: 0.0,inventory:Vec::new(), sprite}
     }
     pub fn draw(&self, camera: (i32, i32)){
         use super::game_engine::TILE_SIZE;

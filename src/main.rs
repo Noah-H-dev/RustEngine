@@ -31,9 +31,9 @@ interactables first (an enum? probably a struct with a lot of fields, which then
 //     players without re-shaping the file.
 //   * Dev-mode lock on the Tileset editor's Definitions tab (so end users
 //     can't mutate the abstract id namespace at runtime).
-//   * Rename textures.toml -> tiledefs.toml and tilesets/*.txt -> *.tileset
-//     for self-documenting filenames (touches game engine load paths +
-//     needs back-compat for existing projects).
+//   * Rename tilesets/*.txt -> *.tileset for self-documenting filenames
+//     (touches game engine load paths + needs back-compat for existing
+//     projects). (textures.toml -> tiledefs.toml is already done.)
 static WINDOW_TITLE: &str = "RustEngine";
 
 fn main() {

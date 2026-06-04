@@ -2,7 +2,7 @@
 //
 // A *tileset* is the per-skin mapping from abstract tile id to a PNG filename
 // in `assets/`. Tile properties (collision, folder, name) live elsewhere in
-// `textures.toml` and are shared across all tilesets — see `tiledefs.rs` and
+// `tiledefs.toml` and are shared across all tilesets — see `tiledefs.rs` and
 // the project-tileset-editor-architecture memory.
 //
 // On-disk format is the same plain `id filename` text the legacy `id.txt` /
