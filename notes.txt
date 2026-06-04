@@ -34,7 +34,15 @@ Unit Templates + Placement + Patrols  [src/game/game_engine.rs, editor.rs]
 
 Per-map Player Spawn  [World::spawn in game_engine.rs, editor.rs spawner tab]
   ---SPAWN--- marker in the map file; Spawner brush places/clears it (max 1);
-  game positions the player there at launch. Built.
+  game positions the player there at launch (fresh Run). Built.
+
+Save / Continue  [Engine::save in game_engine.rs, settings.rs, menus.rs, entity.rs]
+  Pause-menu "Save" button writes player position -> player.toml `spawn` and
+  map/tileset + live unit state (position + patrol_idx) -> gamedata/game.toml.
+  Main menu shows "Continue" when game.toml exists: reloads the map, starts the
+  player from player.toml `spawn`, overlays saved unit state by load order.
+  Division of truth: game.toml = which map + unit state; player.toml = position.
+  Built.
 
 Player Loader  [src/game/entity.rs + player.toml]
   Reads player.toml ([[unit]] array) into a Unit; sprite resolved via the
@@ -59,6 +67,20 @@ Physics Component  [src/game/game_engine.rs]
   Per-tile physics data; `solid` flag blocks movement. Designed to extend
   (friction, bounciness, etc.). Solid done; the rest is room-to-grow only.
 
+Player / Unit Action Split  [game_engine.rs Engine::player_action, entity.rs Unit::current_action, game.rs step_units]
+  Engine.current_action was renamed to player_action (player's per-tick intent,
+  read from input, reset each tick). Each non-player Unit now owns its own
+  current_action (source of truth), set by Unit::decide (AI hook) and applied by
+  Unit::apply_action. game.rs::step_units runs the per-tick decide -> execute ->
+  patrol flow; the execute phase builds a sparse, sortable (unit_index, action)
+  work-list (ready for initiative/turn-order later). Resolution is sequential.
+  TODO -- "ALONGSIDE, NOT DRIVES-MOVEMENT": decide() is currently a stub that
+  returns NONE, so patrol/A* in Unit::update is still the actual mover. Come back
+  and switch to "drives movement": have decide() return a MOVE toward the next
+  patrol step and route movement through Unit::apply_action / the action channel,
+  reworking Unit::update accordingly. Plumbing built; AI logic + drives-movement
+  pending.
+
 -- IN PROGRESS / EARLY --
 
 Items & Gear System  [src/game/item.rs + items.toml]
@@ -72,14 +94,6 @@ Stats / Skills / Characteristics  [src/game/stats.rs]
 
 -- PLANNED / DEFERRED (roadmap, not implemented; see main.rs header) --
 
-Save Button + game.toml  [src/main.rs, src/contexts/game.rs]
-  Snapshot runtime state (last map, player position, future world state) into a
-  top-level game.toml; unlocks resume-on-startup (skip the map picker). Not done.
-
-Persist Player Position to player.toml  [src/game/entity.rs, main.rs]
-  player.toml `spawn` is read/kept but not used at game start (Run always uses
-  the map's ---SPAWN---). Becomes "last known position" when save lands. Not done.
-
 Multi-player Support  [player.toml, src/game/entity.rs]
   player.toml uses [[unit]] array on purpose, but the loader takes only the
   first entry today. Not done.
@@ -92,7 +106,12 @@ Rename tilesets/*.txt -> *.tileset  [main.rs]
   Not done. (textures.toml -> tiledefs.toml rename already done.)
 
 ==========================================================
-
+///IDEA: effects. each unit has a vector of effects which every iteration gets run through and applied to
+/// anything they do (every action that is). each effect will have a type (on move, on attach, on attacked,
+/// on update (an enum)), and each loop the current action will be checked against the effect action. this will
+/// resemble an ECS system, however will slot nicely into how I am approaching this. EX. you could have a sword which on attach applies
+/// another effect of 'guard'. guard lasts for 5 actions (ticked down the same way the speed counter does) and for as long as
+/// it exists, it is an on attacked effect which does damage to the attacker if the attack is successfuly blocked.
 
 pub enum Interaction{
     NONE,

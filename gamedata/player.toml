@@ -1,7 +1,11 @@
 [[unit]]
 sprite_id = 4
-spawn = [10,10]
+spawn = [
+    13,
+    14,
+]
 
 [unit.stats]
 health = 1
-speed = 2
+speed = 2.0
+defense = 0.0

@@ -102,6 +102,50 @@ impl Settings {
     }
 }
 
+// ── Save game ────────────────────────────────────────────────────────────────
+/// The live runtime snapshot, written to / read from game.toml. Pairs with
+/// `player.toml` `spawn` (the player's position): game.toml records which map /
+/// tileset the session is on plus the live state of placed units, while the
+/// player's own position lives in player.toml. Together they let "Continue"
+/// resume a session. units.toml stays the template; `units` here are the live
+/// overrides applied on top of it, matched by load order.
+#[derive(Serialize, Deserialize, Default)]
+pub struct SaveGame {
+    pub map: String,
+    pub tileset: String,
+    #[serde(default)]
+    pub units: Vec<UnitState>,
+}
+
+/// Live position + patrol progress for one placed unit, indexed parallel to the
+/// units produced by `Engine::load_units`.
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct UnitState {
+    pub position: (i32, i32),
+    pub patrol_idx: i32,
+}
+
+impl SaveGame {
+    pub const PATH: &'static str = "gamedata/game.toml";
+
+    pub fn exists() -> bool {
+        std::path::Path::new(Self::PATH).exists()
+    }
+
+    pub fn load() -> Option<Self> {
+        if !Self::exists() { return None; }
+        let content = std::fs::read_to_string(Self::PATH).ok()?;
+        toml::from_str(&content).ok()
+    }
+
+    pub fn save(&self) {
+        if let Ok(content) = toml::to_string_pretty(self) {
+            let _ = std::fs::create_dir_all("gamedata");
+            let _ = std::fs::write(Self::PATH, content);
+        }
+    }
+}
+
 // ── Context trait ──────────────────────────────────────────────────────────────
 /// Implement this for every screen/mode (main menu, gameplay, editor, pause, …).
 /// Return `Some(next_context)` from `update` to transition, `None` to stay.
@@ -109,6 +153,24 @@ pub trait GameContext {
     /// Called at a fixed rate (TICK_RATE). `dt` is seconds per tick.
     fn update(&mut self, engine: &mut Engine, dt: f32) -> Option<Box<dyn GameContext>>;
     fn draw(&mut self, engine: &mut Engine);
+}
+
+///IDEA: effects. each unit has a vector of effects which every iteration gets run through and applied to
+/// anything they do (every action that is). each effect will have a type (on move, on attach, on attacked,
+/// on update (an enum)), and each loop the current action will be checked against the effect action. this will
+/// resemble an ECS system, however will slot nicely into how I am approaching this. EX. you could have a sword which on attach applies
+/// another effect of 'guard'. guard lasts for 5 actions (ticked down the same way the speed counter does) and for as long as
+/// it exists, it is an on attacked effect which does damage to the attacker if the attack is successfuly blocked.
+///
+pub struct ability{
+    game_state: actions,
+    target_unit: (Unit, bool),
+    target_tile: Tile
+}
+pub struct ability_menu{
+    size: i32,
+    scale: i32,
+    ability_list: Vec<ability>
 }
 
 // ── Engine ─────────────────────────────────────────────────────────────────────
@@ -121,7 +183,10 @@ pub struct Engine {
     win: GlWindow,
     sdl: Sdl,
     pub win_open: bool,
-    pub current_action: actions,
+    /// The player's action for this tick, read from input by `poll_input` and
+    /// consumed by the gameplay context. Reset to NONE after each tick. Each
+    /// non-player Unit holds its own `current_action` (see entity.rs).
+    pub player_action: actions,
     pub egui_input: egui::RawInput,
     pub mouse_pos: egui::Pos2,
     pub camera: (i32, i32),
@@ -154,7 +219,7 @@ impl Engine {
             renderer: EguiRenderer::new(gl),
             player,
             win_open: true,
-            current_action: actions::NONE,
+            player_action: actions::NONE,
             egui_input: egui::RawInput::default(),
             mouse_pos: egui::Pos2::default(),
             units: Vec::new(),
@@ -183,7 +248,7 @@ impl Engine {
                 if let Some(next) = context.update(self, DT) {
                     context = next;
                 }
-                self.current_action = actions::NONE;
+                self.player_action = actions::NONE;
                 accumulator = Duration::ZERO;
             }
 
@@ -210,11 +275,26 @@ impl Engine {
         update(
             &mut self.win_open,
             &self.sdl,
-            &mut self.current_action,
+            &mut self.player_action,
             &mut self.egui_input,
             &mut self.mouse_pos,
         );
     }
+    /// Snapshot the running game: write the player's tile into `player.toml`
+    /// `spawn` and the map/tileset + live unit state into `game.toml`. Called by
+    /// the pause-menu Save button.
+    pub fn save(&self, map_path: &str, id_path: &str) {
+        super::entity::save_player_spawn(self.player.position);
+        let units = self.units.iter()
+            .map(|u| UnitState { position: u.position, patrol_idx: u.patrol_idx })
+            .collect();
+        SaveGame {
+            map: map_path.to_string(),
+            tileset: id_path.to_string(),
+            units,
+        }.save();
+    }
+
     pub fn load_units(id_path: &str) -> Vec<Unit> {
         const UNITS_PATH: &str = "gamedata/units.toml";
         if !std::path::Path::new(UNITS_PATH).exists() { return Vec::new(); }

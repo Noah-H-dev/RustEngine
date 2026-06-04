@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use RustEngine::game::game_engine::{Engine, GameContext};
+use RustEngine::game::game_engine::{Engine, GameContext, SaveGame};
 
 use super::editor_menu::EditorMenuContext;
 use super::game::GameRunningContext;
@@ -67,11 +67,15 @@ impl GameContext for MainMenuContext {
 
     fn draw(&mut self, engine: &mut Engine) {
         // Boolean flags written inside the closure, acted on after it returns.
-        let mut toggle_game  = false;
-        let mut confirm_game = false;
-        let mut go_editor    = false;
-        let mut go_settings  = false;
-        let mut quit_app     = false;
+        let mut toggle_game   = false;
+        let mut confirm_game  = false;
+        let mut continue_game = false;
+        let mut go_editor     = false;
+        let mut go_settings   = false;
+        let mut quit_app      = false;
+
+        // A Continue button appears only when a saved session exists.
+        let has_save = SaveGame::exists();
 
         let (w, h) = engine.screen_size();
         let input = engine.egui_input.clone();
@@ -82,6 +86,14 @@ impl GameContext for MainMenuContext {
                 ui.vertical_centered(|ui| {
                     ui.heading("RustEngine");
                     ui.add_space(16.0);
+
+                    // ── Continue (only when a save exists) ──
+                    if has_save {
+                        if ui.add_sized([160.0, 40.0], egui::Button::new("Continue")).clicked() {
+                            continue_game = true;
+                        }
+                        ui.add_space(8.0);
+                    }
 
                     // ── New Game ──
                     let game_fill = if self.game_sub.is_visible() {
@@ -159,6 +171,24 @@ impl GameContext for MainMenuContext {
                     self.error_msg = None;
                     self.pending_transition = Some(Box::new(GameRunningContext::new(&map, &ids)));
                 }
+            }
+        }
+
+        if continue_game {
+            // Resume the saved session. Validate the referenced files still
+            // exist (map or tileset may have been moved/deleted since saving).
+            match SaveGame::load() {
+                Some(save) if !Path::new(&save.map).exists() => {
+                    self.error_msg = Some(format!("Saved map not found: {}", save.map));
+                }
+                Some(save) if !Path::new(&save.tileset).exists() => {
+                    self.error_msg = Some(format!("Saved tileset not found: {}", save.tileset));
+                }
+                Some(save) => {
+                    self.error_msg = None;
+                    self.pending_transition = Some(Box::new(GameRunningContext::continue_from(save)));
+                }
+                None => { self.error_msg = Some("Could not read save file (game.toml).".into()); }
             }
         }
 

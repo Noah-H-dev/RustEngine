@@ -145,11 +145,14 @@ pub mod tools {
     pub static mut SCREEN_WIDTH: i32 = 800;
     pub static mut SCREEN_HEIGHT: i32 = 600;
 
+    #[derive(Clone, Copy, PartialEq, Default)]
     pub enum actions{
+        #[default]
         NONE,
         MOVE {dir: directions},
     }
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
     pub enum directions{
         UP ,
         DOWN,

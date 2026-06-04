@@ -1,4 +1,4 @@
 pub mod game_engine;
 pub mod stats;
-mod entity;
+pub mod entity;
 mod item;

@@ -12,19 +12,18 @@ interactables first (an enum? probably a struct with a lot of fields, which then
 
  */
 
+// ── Save / resume (IMPLEMENTED) ─────────────────────────────────────────────
+// The pause menu's "Save" button calls `Engine::save`, which writes the player
+// position into `player.toml` `spawn` and the map / tileset / live unit state
+// into `gamedata/game.toml`. The main menu shows a "Continue" button whenever
+// game.toml exists; it resumes the map, starts the player from player.toml
+// `spawn`, and overlays the saved unit positions / patrol progress. A fresh
+// "Run" still starts at the map's ---SPAWN--- and ignores player.toml `spawn`.
+//
 // ── Planned features deliberately deferred ──────────────────────────────────
 // These are intentionally NOT implemented yet — the code is shaped to make room
 // for them but does not include them. Each is on the roadmap.
 //
-//   * Save button + game.toml. A "save game" action that snapshots current
-//     runtime state into a top-level game.toml (last map loaded, player
-//     position, future world state). Also unlocks: "load last session"
-//     behavior on startup (skip the menu's map picker and resume).
-//   * Persist runtime player position back to player.toml on save. The
-//     player.toml `spawn = [x, y]` field is read and kept today but is not
-//     used at game start — `Run` always spawns at the map's ---SPAWN---
-//     marker. When the save button lands, `spawn` becomes the "last known
-//     position" field that gets written there and consulted on resume.
 //   * Multi-player support. `player.toml` uses [[unit]] (array of tables)
 //     intentionally, but the loader currently takes the first entry and
 //     ignores any others. A future change can expand this to multiple

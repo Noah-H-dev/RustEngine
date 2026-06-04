@@ -1,3 +1,3 @@
-real_time = true
+real_time = false
 dpi_per_monitor = true
 active_tileset = 'tilesets\Default.txt'

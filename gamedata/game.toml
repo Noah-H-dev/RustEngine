@@ -1,0 +1,16 @@
+map = 'maps\map.txt'
+tileset = 'tilesets\Default.txt'
+
+[[units]]
+position = [
+    2,
+    9,
+]
+patrol_idx = 0
+
+[[units]]
+position = [
+    5,
+    10,
+]
+patrol_idx = 0

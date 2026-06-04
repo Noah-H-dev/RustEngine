@@ -115,7 +115,7 @@ fn settings_for_tab<'a>(tab: SettingsTab, s: &'a mut Settings) -> Vec<(&'static 
 enum SettingsTab { Game, Video, Audio }
 
 #[derive(Clone, Copy)]
-enum SettingsAction { Return, MainMenu, Quit }
+enum SettingsAction { Save, Return, MainMenu, Quit }
 
 enum ReturnDest {
     MainMenu,
@@ -127,6 +127,8 @@ pub struct SettingsContext {
     active_tab:  SettingsTab,
     pending:     Option<Box<dyn GameContext>>,
     do_quit:     bool,
+    /// Set after a successful in-game Save, to show a brief confirmation.
+    saved:       bool,
 }
 
 impl SettingsContext {
@@ -147,6 +149,7 @@ impl SettingsContext {
             active_tab: SettingsTab::Game,
             pending:    None,
             do_quit:    false,
+            saved:      false,
         }
     }
 
@@ -183,6 +186,9 @@ impl GameContext for SettingsContext {
         }
 
         let active_tab = self.active_tab;
+        // Save only makes sense in-game (we know which map/tileset to write).
+        let from_game  = matches!(self.return_dest, ReturnDest::Game { .. });
+        let saved      = self.saved;
         let (w, h)     = engine.screen_size();
         let input      = engine.egui_input.clone();
         // Hand the closure a reborrowable &mut into settings — disjoint from
@@ -211,11 +217,19 @@ impl GameContext for SettingsContext {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     ui.add_space(96.0);
+                    if from_game {
+                        if ui.button("Save").clicked()         { action = Some(SettingsAction::Save);     }
+                        ui.add_space(8.0);
+                    }
                     if ui.button("Return").clicked()            { action = Some(SettingsAction::Return);   }
                     ui.add_space(8.0);
                     if ui.button("Exit to Main Menu").clicked() { action = Some(SettingsAction::MainMenu); }
                     ui.add_space(8.0);
                     if ui.button("Quit").clicked()              { action = Some(SettingsAction::Quit);     }
+                    if saved {
+                        ui.add_space(8.0);
+                        ui.colored_label(egui::Color32::from_rgb(120, 200, 120), "Game saved.");
+                    }
                 });
                 ui.add_space(8.0);
             });
@@ -236,6 +250,12 @@ impl GameContext for SettingsContext {
 
         if let Some(tab) = new_tab { self.active_tab = tab; }
         match action {
+            Some(SettingsAction::Save)     => {
+                if let ReturnDest::Game { map_path, id_path } = &self.return_dest {
+                    engine.save(map_path, id_path);
+                    self.saved = true;
+                }
+            }
             Some(SettingsAction::Return)   => { engine.settings.save(); self.pending = Some(self.return_context()); }
             Some(SettingsAction::MainMenu) => { engine.settings.save(); self.pending = Some(Box::new(MainMenuContext::new())); }
             Some(SettingsAction::Quit)     => { self.do_quit = true; }

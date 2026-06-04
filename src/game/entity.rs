@@ -20,19 +20,19 @@ use crate::game::item::item;
 const PLAYER_FILE:     &str = "gamedata/player.toml";
 const FALLBACK_SPRITE: &str = "assets/player.png";
 
-#[derive(Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default)]
 struct PlayerFile {
     #[serde(default)]
     unit: Vec<PlayerRecord>,
 }
 
-/// One persisted player. `spawn` is stored for the future save-game flow
-/// (see main.rs deferred list) — it is NOT used at game start today; the
-/// per-map ---SPAWN--- marker determines the actual starting tile.
-#[derive(Deserialize, Default)]
+/// One persisted player. `spawn` doubles as the save-game position: a fresh Run
+/// ignores it (the map's ---SPAWN--- positions the player), but Save writes the
+/// player's current tile here and Continue starts the player from it.
+#[derive(Serialize, Deserialize, Default)]
 struct PlayerRecord {
-    #[serde(default)] sprite_id: Option<i32>,
-    #[serde(default)] spawn:     Option<[i32; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] sprite_id: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] spawn:     Option<[i32; 2]>,
     #[serde(default)] stats:     stats,
 }
 
@@ -59,10 +59,36 @@ pub fn load_player(id_path: &str) -> Unit {
     unit
 }
 
-/// The default spawn coordinate persisted in `player.toml`, if any. Returned
-/// as `(x, y)`. Used as a fallback when the loaded map has no per-map spawn.
+/// The player position persisted in `player.toml` `spawn`, if any, as `(x, y)`.
+/// This is the last-saved location, read by the Continue flow to resume the
+/// player where they left off.
 pub fn player_default_spawn() -> Option<(i32, i32)> {
     load_player_record().spawn.map(|[x, y]| (x, y))
+}
+
+/// Persist the player's current tile into `player.toml` `spawn`, preserving the
+/// rest of the file (sprite_id, stats, and any further [[unit]] entries). The
+/// first `[[unit]]` is the player; created if the file is empty/absent.
+pub fn save_player_spawn(pos: (i32, i32)) {
+    let mut file = if std::path::Path::new(PLAYER_FILE).exists() {
+        let content = std::fs::read_to_string(PLAYER_FILE).unwrap_or_default();
+        match toml::from_str::<PlayerFile>(&content) {
+            Ok(f) => f,
+            // File exists but won't parse — bail rather than overwrite it with a
+            // blank default and lose the player's sprite_id / stats.
+            Err(_) => return,
+        }
+    } else {
+        PlayerFile::default()
+    };
+    if file.unit.is_empty() {
+        file.unit.push(PlayerRecord::default());
+    }
+    file.unit[0].spawn = Some([pos.0, pos.1]);
+    if let Ok(content) = toml::to_string_pretty(&file) {
+        let _ = std::fs::create_dir_all("gamedata");
+        let _ = std::fs::write(PLAYER_FILE, content);
+    }
 }
 
 pub struct properties{
@@ -79,12 +105,45 @@ pub struct Unit {
     pub stats: stats,
     pub action_time:f64,
     pub inventory: Vec<item>,
+    /// This unit's intended action for the current tick — the single source of
+    /// truth for non-player units. Set by `decide` (the AI hook) and consumed by
+    /// the gameplay context's execute phase, then reset to NONE. The player's
+    /// equivalent lives on the Engine as `player_action`.
+    pub current_action: actions,
     sprite: GLObject,
 
 }
 impl Unit {
     pub fn new(position: (i32,i32),target_position: (i32,i32), sprite:GLObject) -> Unit {
-        return Unit {position,target_position,size: 1.0, patrol: vec!(),patrol_idx:0, path: vec!(), stats:stats::new(1,1.0, 0.0),action_time: 0.0,inventory:Vec::new(), sprite}
+        return Unit {position,target_position,size: 1.0, patrol: vec!(),patrol_idx:0, path: vec!(), stats:stats::new(1,1.0, 0.0),action_time: 0.0,inventory:Vec::new(), current_action: actions::NONE, sprite}
+    }
+
+    /// AI decision hook: decide what this unit intends to do this tick.
+    ///
+    /// NOTE (alongside, not drives-movement): this is a stub that always returns
+    /// NONE for now. Patrol/A* in `update` still drives unit movement; this hook
+    /// only proves the player_action / unit current_action plumbing end-to-end.
+    /// TODO come back and switch to "drives movement": have `decide` return a
+    /// MOVE toward the next patrol step so movement flows through the action
+    /// channel (and rework `update` accordingly). See notes.txt.
+    pub fn decide(&self, _world: &World, _player: &Unit) -> actions {
+        actions::NONE
+    }
+
+    /// Apply a decided action to this unit. Mirrors how the player executes a
+    /// MOVE: nudge the target one tile and re-path so `update` walks it. Today
+    /// the execute phase never feeds a non-NONE action here (see `decide`), but
+    /// this is the seam the "drives movement" rework will use.
+    pub fn apply_action(&mut self, action: actions, world: &World) {
+        match action {
+            actions::MOVE { dir } => {
+                let (dx, dy) = dir.value();
+                self.target_position.0 += dx as i32;
+                self.target_position.1 += dy as i32;
+                self.update_path(world);
+            }
+            actions::NONE => {}
+        }
     }
     pub fn draw(&self, camera: (i32, i32)){
         use super::game_engine::TILE_SIZE;
@@ -94,6 +153,7 @@ impl Unit {
             TILE_SIZE as f32,
         );
     }
+    //attacks?
     pub fn update(&mut self, world: &World){
         let mut current_move = (0,0);
         self.action_time += self.stats.speed;

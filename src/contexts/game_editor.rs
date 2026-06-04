@@ -63,11 +63,35 @@ struct CreatureDraft {
     sprite_def_is_new: bool,
     health: i64,
     speed: f64,
+    defense: f64,
+    /// The unit's full stats carried through the edit. The form exposes the
+    /// fields above; every other stat field (and any future one) rides along
+    /// here so it is preserved on edit and defaulted on create, rather than
+    /// being zeroed each time the unit is saved.
+    base_stats: stats,
 }
 
 impl CreatureDraft {
     fn new() -> Self {
-        CreatureDraft { name: String::new(), sprite_id: None, sprite_def_is_new: false, health: 1, speed: 1.0 }
+        let base = stats::default();
+        CreatureDraft {
+            name: String::new(),
+            sprite_id: None,
+            sprite_def_is_new: false,
+            health: base.health,
+            speed: base.speed,
+            defense: base.defense,
+            base_stats: base,
+        }
+    }
+
+    /// The stats to persist: the carried base with the form-edited fields applied.
+    fn build_stats(&self) -> stats {
+        let mut st = self.base_stats.clone();
+        st.health  = self.health;
+        st.speed   = self.speed;
+        st.defense = self.defense;
+        st
     }
 }
 
@@ -160,12 +184,13 @@ impl GameEditorContext {
         self.draft.sprite_def_is_new = true;
     }
 
-    fn apply(&mut self, intent: Intent, draft_name: String, draft_health: i64, draft_speed: f64) {
+    fn apply(&mut self, intent: Intent, draft_name: String, draft_health: i64, draft_speed: f64, draft_defense: f64) {
         // Mirror draft edits back while a form is open.
         if matches!(self.mode, CreatureMode::Creating | CreatureMode::Editing { .. }) {
-            self.draft.name   = draft_name;
-            self.draft.health = draft_health;
-            self.draft.speed  = draft_speed;
+            self.draft.name    = draft_name;
+            self.draft.health  = draft_health;
+            self.draft.speed   = draft_speed;
+            self.draft.defense = draft_defense;
             if let Some(s) = intent.new_draft_sprite {
                 self.draft.sprite_id = Some(s);
                 self.draft.sprite_def_is_new = false;
@@ -193,13 +218,15 @@ impl GameEditorContext {
             }
             FormAction::OpenEdit(idx) => {
                 let record = &self.units[idx];
-                let (h, s) = record.stats.as_ref().map(|st| (st.health, st.speed)).unwrap_or((1, 1.0));
+                let base = record.stats.clone().unwrap_or_default();
                 self.draft = CreatureDraft {
                     name:      record.name.clone(),
                     sprite_id: record.sprite_id,
                     sprite_def_is_new: false,
-                    health:    h,
-                    speed:     s,
+                    health:    base.health,
+                    speed:     base.speed,
+                    defense:   base.defense,
+                    base_stats: base,
                 };
                 self.mode = CreatureMode::Editing { index: idx };
             }
@@ -217,13 +244,13 @@ impl GameEditorContext {
                             sprite_id: self.draft.sprite_id,
                             positions: vec![],
                             patrols:   vec![],
-                            stats:     Some(stats::new(self.draft.health, self.draft.speed, 0.0)), //fix
+                            stats:     Some(self.draft.build_stats()),
                         });
                     }
                     CreatureMode::Editing { index } => {
                         self.units[index].name      = self.draft.name.clone();
                         self.units[index].sprite_id = self.draft.sprite_id;
-                        self.units[index].stats     = Some(stats::new(self.draft.health, self.draft.speed,0.0)); //fix
+                        self.units[index].stats     = Some(self.draft.build_stats());
                     }
                     CreatureMode::Idle => {}
                 }
@@ -258,8 +285,9 @@ impl GameContext for GameEditorContext {
         let sprites    = if tab == GameTab::Creature { self.creature_sprites() } else { Vec::new() };
         let mut draft_name   = self.draft.name.clone();
         let draft_sprite     = self.draft.sprite_id;
-        let mut draft_health = self.draft.health;
-        let mut draft_speed  = self.draft.speed;
+        let mut draft_health  = self.draft.health;
+        let mut draft_speed   = self.draft.speed;
+        let mut draft_defense = self.draft.defense;
 
         let (w, h) = engine.screen_size();
         let input  = engine.egui_input.clone();
@@ -347,6 +375,10 @@ impl GameContext for GameEditorContext {
                                     ui.label("Speed:");
                                     ui.add(egui::DragValue::new(&mut draft_speed).range(0.0..=f64::MAX).speed(0.1));
                                 });
+                                ui.horizontal(|ui| {
+                                    ui.label("Defense:");
+                                    ui.add(egui::DragValue::new(&mut draft_defense).range(0.0..=f64::MAX).speed(0.1));
+                                });
                             });
                             ui.add_space(2.0);
                             ui.collapsing("Feats", |ui| { ui.label("(not yet implemented)"); });
@@ -365,6 +397,6 @@ impl GameContext for GameEditorContext {
             });
         });
 
-        self.apply(intent, draft_name, draft_health, draft_speed);
+        self.apply(intent, draft_name, draft_health, draft_speed, draft_defense);
     }
 }
