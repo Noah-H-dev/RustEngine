@@ -162,16 +162,7 @@ pub trait GameContext {
 /// another effect of 'guard'. guard lasts for 5 actions (ticked down the same way the speed counter does) and for as long as
 /// it exists, it is an on attacked effect which does damage to the attacker if the attack is successfuly blocked.
 ///
-pub struct ability{
-    game_state: actions,
-    target_unit: (Unit, bool),
-    target_tile: Tile
-}
-pub struct ability_menu{
-    size: i32,
-    scale: i32,
-    ability_list: Vec<ability>
-}
+
 
 // ── Engine ─────────────────────────────────────────────────────────────────────
 pub struct Engine {

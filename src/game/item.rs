@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use crate::game::ability::Effect;
 use crate::game::stats::stats;
 use crate::shaders::{FRAG_SHADER, VERT_SHADER};
 use crate::tools::{load_textures, GLObject, BL_RECTANGLE};
@@ -62,10 +63,7 @@ pub fn store_items(items: &[item]){
         let _ = std::fs::write(ITEMS_PATH, s);
     }
 }
-#[derive(Serialize, Deserialize, Clone)]
-pub struct Effects {
 
-}
 
 //lots of work to be done. give each enum field a personal struct which holds their data
 //im jumping the gun here, I need to impliment attaching and "turns" before I get to this.
@@ -81,7 +79,7 @@ pub enum GearType {
 pub struct Armor {
     defense: i32,
     stat_mods: stats_mod,
-    effects: Vec<Effects>
+    effects: Vec<Effect>
 }
 #[derive(Serialize, Deserialize, Clone)]
 pub enum WeaponType {
