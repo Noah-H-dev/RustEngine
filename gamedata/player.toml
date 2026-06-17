@@ -1,8 +1,8 @@
 [[unit]]
 sprite_id = 4
 spawn = [
-    13,
-    14,
+    9,
+    7,
 ]
 
 [unit.stats]

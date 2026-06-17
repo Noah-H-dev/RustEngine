@@ -81,6 +81,21 @@ Player / Unit Action Split  [game_engine.rs Engine::player_action, entity.rs Uni
   reworking Unit::update accordingly. Plumbing built; AI logic + drives-movement
   pending.
 
+Input Layering: Neutral Keys  [src/lib.rs tools::Key, game_engine.rs Engine::keys_pressed, contexts/game.rs]
+  The SDL event pump (lib.rs::update) no longer decides what keys *mean*. It
+  translates raw scancodes into an engine-neutral `Key` enum (Key::from_scancode)
+  and pushes the frame's presses into Engine.keys_pressed; egui input / quit /
+  resize / mouse handling stay in the pump as app-level concerns. Each context
+  reads keys_pressed and interprets it: GameRunningContext maps WASD -> actions
+  (keys_to_action) and Escape -> settings overlay. keys_pressed is cleared in the
+  run loop alongside player_action after each tick, so input detection must live
+  in update(), not draw() (draw runs after the clear). Payoff: menus/editors are
+  no longer implicitly subject to gameplay keybindings; new bindings are a local
+  change in one context, touching neither the pump nor other contexts.
+  Discrete-press only (matches pressed && repeat == 0). TODO: held-key state for
+  smooth real_time movement (track press/release into a held set) is deferred;
+  mouse buttons still go to egui only (not yet surfaced as neutral input).
+
 -- IN PROGRESS / EARLY --
 
 Items & Gear System  [src/game/item.rs + items.toml]

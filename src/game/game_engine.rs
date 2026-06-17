@@ -178,6 +178,10 @@ pub struct Engine {
     /// consumed by the gameplay context. Reset to NONE after each tick. Each
     /// non-player Unit holds its own `current_action` (see entity.rs).
     pub player_action: actions,
+    /// Neutral keys pressed since the last tick consumed them, filled by the
+    /// event pump (`poll_input`) and interpreted by the active context. Cleared
+    /// alongside `player_action` after each tick. See `tools::Key`.
+    pub keys_pressed: Vec<Key>,
     pub egui_input: egui::RawInput,
     pub mouse_pos: egui::Pos2,
     pub camera: (i32, i32),
@@ -211,6 +215,7 @@ impl Engine {
             player,
             win_open: true,
             player_action: actions::NONE,
+            keys_pressed: Vec::new(),
             egui_input: egui::RawInput::default(),
             mouse_pos: egui::Pos2::default(),
             units: Vec::new(),
@@ -240,6 +245,7 @@ impl Engine {
                     context = next;
                 }
                 self.player_action = actions::NONE;
+                self.keys_pressed.clear();
                 accumulator = Duration::ZERO;
             }
 
@@ -266,7 +272,7 @@ impl Engine {
         update(
             &mut self.win_open,
             &self.sdl,
-            &mut self.player_action,
+            &mut self.keys_pressed,
             &mut self.egui_input,
             &mut self.mouse_pos,
         );

@@ -175,6 +175,63 @@ pub mod tools {
         }
     }
 
+    /// Engine-neutral keyboard key. The event pump (`update`) maps raw SDL
+    /// scancodes into this once; every context then matches on `Key` instead of
+    /// touching SDL/egui types directly. This is the boundary that keeps gameplay
+    /// key *semantics* (e.g. "W means move up") out of the pump — the pump only
+    /// reports *which* key was pressed; each context decides what it means.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+    pub enum Key {
+        A, B, C, D, E, F, G, H, I, J, K, L, M,
+        N, O, P, Q, R, S, T, U, V, W, X, Y, Z,
+        Num0, Num1, Num2, Num3, Num4, Num5, Num6, Num7, Num8, Num9,
+        Up, Down, Left, Right,
+        Space, Enter, Escape, Tab, Backspace, Delete,
+        Home, End, PageUp, PageDown, Insert,
+        F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12,
+        LShift, RShift, LCtrl, RCtrl, LAlt, RAlt,
+    }
+
+    impl Key {
+        /// Translate an SDL scancode into the engine-neutral `Key`. Returns
+        /// `None` for keys we don't expose to gameplay yet — add an arm here to
+        /// surface a new key; no context code or the pump body needs to change.
+        pub fn from_scancode(sc: SDL_Scancode) -> Option<Key> {
+            Some(match sc {
+                SDL_SCANCODE_A => Key::A, SDL_SCANCODE_B => Key::B, SDL_SCANCODE_C => Key::C,
+                SDL_SCANCODE_D => Key::D, SDL_SCANCODE_E => Key::E, SDL_SCANCODE_F => Key::F,
+                SDL_SCANCODE_G => Key::G, SDL_SCANCODE_H => Key::H, SDL_SCANCODE_I => Key::I,
+                SDL_SCANCODE_J => Key::J, SDL_SCANCODE_K => Key::K, SDL_SCANCODE_L => Key::L,
+                SDL_SCANCODE_M => Key::M, SDL_SCANCODE_N => Key::N, SDL_SCANCODE_O => Key::O,
+                SDL_SCANCODE_P => Key::P, SDL_SCANCODE_Q => Key::Q, SDL_SCANCODE_R => Key::R,
+                SDL_SCANCODE_S => Key::S, SDL_SCANCODE_T => Key::T, SDL_SCANCODE_U => Key::U,
+                SDL_SCANCODE_V => Key::V, SDL_SCANCODE_W => Key::W, SDL_SCANCODE_X => Key::X,
+                SDL_SCANCODE_Y => Key::Y, SDL_SCANCODE_Z => Key::Z,
+                SDL_SCANCODE_1 => Key::Num1, SDL_SCANCODE_2 => Key::Num2, SDL_SCANCODE_3 => Key::Num3,
+                SDL_SCANCODE_4 => Key::Num4, SDL_SCANCODE_5 => Key::Num5, SDL_SCANCODE_6 => Key::Num6,
+                SDL_SCANCODE_7 => Key::Num7, SDL_SCANCODE_8 => Key::Num8, SDL_SCANCODE_9 => Key::Num9,
+                SDL_SCANCODE_0 => Key::Num0,
+                SDL_SCANCODE_UP => Key::Up, SDL_SCANCODE_DOWN => Key::Down,
+                SDL_SCANCODE_LEFT => Key::Left, SDL_SCANCODE_RIGHT => Key::Right,
+                SDL_SCANCODE_SPACE => Key::Space,
+                SDL_SCANCODE_RETURN | SDL_SCANCODE_KP_ENTER => Key::Enter,
+                SDL_SCANCODE_ESCAPE => Key::Escape, SDL_SCANCODE_TAB => Key::Tab,
+                SDL_SCANCODE_BACKSPACE => Key::Backspace, SDL_SCANCODE_DELETE => Key::Delete,
+                SDL_SCANCODE_HOME => Key::Home, SDL_SCANCODE_END => Key::End,
+                SDL_SCANCODE_PAGEUP => Key::PageUp, SDL_SCANCODE_PAGEDOWN => Key::PageDown,
+                SDL_SCANCODE_INSERT => Key::Insert,
+                SDL_SCANCODE_F1 => Key::F1, SDL_SCANCODE_F2 => Key::F2, SDL_SCANCODE_F3 => Key::F3,
+                SDL_SCANCODE_F4 => Key::F4, SDL_SCANCODE_F5 => Key::F5, SDL_SCANCODE_F6 => Key::F6,
+                SDL_SCANCODE_F7 => Key::F7, SDL_SCANCODE_F8 => Key::F8, SDL_SCANCODE_F9 => Key::F9,
+                SDL_SCANCODE_F10 => Key::F10, SDL_SCANCODE_F11 => Key::F11, SDL_SCANCODE_F12 => Key::F12,
+                SDL_SCANCODE_LSHIFT => Key::LShift, SDL_SCANCODE_RSHIFT => Key::RShift,
+                SDL_SCANCODE_LCTRL => Key::LCtrl, SDL_SCANCODE_RCTRL => Key::RCtrl,
+                SDL_SCANCODE_LALT => Key::LAlt, SDL_SCANCODE_RALT => Key::RAlt,
+                _ => return None,
+            })
+        }
+    }
+
     pub fn ortho(width:i32, height:i32, mirror_vert:bool) -> Mat4{
         let mirror_vertical = glam::Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0));
         match mirror_vert {
@@ -194,7 +251,7 @@ pub mod tools {
         }
     }
 
-    pub fn update(win_state: &mut bool, SDL: &Sdl, action: &mut actions, egui_input: &mut egui::RawInput, mouse_pos: &mut egui::Pos2) {
+    pub fn update(win_state: &mut bool, SDL: &Sdl, keys: &mut Vec<Key>, egui_input: &mut egui::RawInput, mouse_pos: &mut egui::Pos2) {
         while let Some((event, _timestamp)) = SDL.poll_events() {
             match event {
                 Event::Quit => *win_state = false,
@@ -228,13 +285,12 @@ pub mod tools {
                     }
                 }
                 Event::Key { pressed, scancode, modifiers, repeat, .. } => {
+                    // Emit a neutral key press for contexts to interpret. We do
+                    // NOT decide what the key *means* here (that's the context's
+                    // job) — the pump only reports which key went down this frame.
                     if pressed && repeat == 0 {
-                        match scancode {
-                            SDL_SCANCODE_W => *action = actions::MOVE {dir: directions::UP},
-                            SDL_SCANCODE_S => *action = actions::MOVE {dir: directions::DOWN},
-                            SDL_SCANCODE_A => *action = actions::MOVE {dir: directions::LEFT},
-                            SDL_SCANCODE_D => *action = actions::MOVE {dir: directions::RIGHT},
-                            _ => (),
+                        if let Some(key) = Key::from_scancode(scancode) {
+                            keys.push(key);
                         }
                     }
                     let m = modifiers.0;

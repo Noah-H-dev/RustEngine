@@ -1,6 +1,6 @@
 use RustEngine::game::game_engine::{Engine, GameContext, SaveGame, UnitState, World};
 use RustEngine::game::entity::player_default_spawn;
-use RustEngine::tools::actions;
+use RustEngine::tools::{actions, directions, Key};
 use super::settings::SettingsContext;
 
 // ── Gameplay ───────────────────────────────────────────────────────────────────
@@ -62,6 +62,17 @@ impl GameRunningContext {
 
 impl GameContext for GameRunningContext {
     fn update(&mut self, engine: &mut Engine, _dt: f32) -> Option<Box<dyn GameContext>> {
+        // Gameplay decides what the neutral keys mean. The pump no longer knows
+        // that WASD is movement — that binding lives here, so menus/editors are
+        // unaffected by it.
+        engine.player_action = keys_to_action(&engine.keys_pressed);
+
+        // Escape opens the in-game settings/pause overlay. Detected here (not in
+        // draw) because the tick loop clears `keys_pressed` before draw runs.
+        if engine.keys_pressed.contains(&Key::Escape) {
+            self.wants_settings = true;
+        }
+
         if !self.loaded {
             engine.world = World::load(&self.map_path, &self.id_path);
             engine.units = Engine::load_units(&self.id_path);
@@ -135,17 +146,29 @@ impl GameContext for GameRunningContext {
     }
 
     fn draw(&mut self, engine: &mut Engine) {
-        let esc = engine.egui_input.events.iter().any(|e| matches!(
-            e, egui::Event::Key { key: egui::Key::Escape, pressed: true, .. }
-        ));
-        if esc { self.wants_settings = true; }
-
         engine.world.draw(engine.camera, 1.0);
         for unit in &engine.units {
             unit.draw(engine.camera);
         }
         engine.player.draw(engine.camera);
     }
+}
+
+/// Map this tick's neutral key presses to the player's intended action. WASD →
+/// movement; last directional key pressed this frame wins (matching the old
+/// pump's overwrite behavior). Non-movement keys are ignored here.
+fn keys_to_action(keys: &[Key]) -> actions {
+    let mut action = actions::NONE;
+    for key in keys {
+        action = match key {
+            Key::W => actions::MOVE { dir: directions::UP },
+            Key::S => actions::MOVE { dir: directions::DOWN },
+            Key::A => actions::MOVE { dir: directions::LEFT },
+            Key::D => actions::MOVE { dir: directions::RIGHT },
+            _ => continue,
+        };
+    }
+    action
 }
 
 /// Run all non-player units for one tick: decide phase -> execute phase -> the
