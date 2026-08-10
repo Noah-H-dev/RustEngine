@@ -107,6 +107,17 @@ Stats / Skills / Characteristics  [src/game/stats.rs]
   Stats struct exists; comment flags "much work to do, maybe a scaling struct."
   Early scaffolding.
 
+Abilities / Ability Menu  [src/game/ability.rs]
+  Scaffolded, not implemented. AbilityType (ATTACK/BUFF/DEBUFF/INTERACTION),
+  TriggerType, Effect{trigger,stats_mods,duration}. An Ability holds a new_state
+  (actions), class, target unit/tile, applied effects, and a display sprite.
+  Design intent: AbilityMenu loops its ability_list and draws each sprite (bottom,
+  centered) in-game when its draw method is called. Pressing an ability's button —
+  keypad 1-9 (number = its position in ability_list) or an EGUI click — updates the
+  player_state based on the ability's new_state. AI will also have access to these
+  (handled later). Open question: should the display sprite be a GLObject or an
+  EGUI-drawn thing? (Do not actually call the draw method when built yet.)
+
 -- PLANNED / DEFERRED (roadmap, not implemented; see main.rs header) --
 
 Multi-player Support  [player.toml, src/game/entity.rs]
@@ -121,6 +132,15 @@ Rename tilesets/*.txt -> *.tileset  [main.rs]
   Not done. (textures.toml -> tiledefs.toml rename already done.)
 
 ==========================================================
+--- Rough design musings (from main.rs header) ---
+- Start thinking about stats and game logic — stats are there!
+- Bundled objects: stop allowing base tile painting; a struct with a vec of
+  tilecoords, drawn bottom-left to top-right but all holding 1 id. (Maybe not.)
+- Interactables? Another layer? Or properties of tiles in the tileset? (Prefer the
+  second.) Interactables first — an enum, or probably a struct with a lot of fields;
+  then in a UI draw loop, if interact_pressed for a type in interact_menu, run the
+  combat/interaction.
+
 ///IDEA: effects. each unit has a vector of effects which every iteration gets run through and applied to
 /// anything they do (every action that is). each effect will have a type (on move, on attach, on attacked,
 /// on update (an enum)), and each loop the current action will be checked against the effect action. this will
@@ -148,6 +168,9 @@ rock{
     .
     interact: interactable
 }
+
+(HOWTO for wiring a collected KEY into a player action moved to docs.txt.
+ The Interaction sketch below is the same adjacent-tile pattern.)
 
 if SDL_KEY == KEY_E{
     SDL_GET_KEY{

@@ -3,14 +3,14 @@ tileset = 'tilesets\Default.txt'
 
 [[units]]
 position = [
-    8,
-    8,
+    14,
+    13,
 ]
 patrol_idx = 0
 
 [[units]]
 position = [
-    8,
-    12,
+    11,
+    6,
 ]
-patrol_idx = 2
+patrol_idx = 1

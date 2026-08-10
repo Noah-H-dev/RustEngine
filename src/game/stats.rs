@@ -1,8 +1,6 @@
 use serde::{Serialize, Deserialize};
 
 
-
-//stats, skills, characteristics
 #[derive(Clone, Serialize, Deserialize)]
 pub struct characteristics{
     constitution: i32,
@@ -11,10 +9,6 @@ pub struct characteristics{
     will: i32,
     intelligence: i32
 }
-// `#[serde(default)]` (container-level) fills any field missing from a TOML
-// file from the `Default` impl below. Without it, adding a new field here
-// silently breaks every older units.toml / player.toml that predates it: the
-// whole file fails to parse and load_units/load_player fall back to empty.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct stats {
@@ -24,7 +18,6 @@ pub struct stats {
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct skills{
-    //much work to do maybe a scaling struct? return to this
     guns:i32,
     melee:i32,
     throwing:i32,

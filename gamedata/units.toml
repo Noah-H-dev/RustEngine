@@ -8,14 +8,16 @@ patrols = [[[8, 8], [5, 3], [9, 2]]]
 [unit.stats]
 health = 1
 speed = 0.1
+defense = 0.0
 
 [[unit]]
 id = 2
 name = "angry rock"
 sprite_id = 5
 positions = [[5, 10]]
-patrols = [[[8, 12], [10, 7], [5, 10]]]
+patrols = [[[8, 12], [10, 7], [5, 10], [5, 5], [11, 5]]]
 
 [unit.stats]
 health = 1
-speed = 1.0
+speed = 0.1
+defense = 0.0

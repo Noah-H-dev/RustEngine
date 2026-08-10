@@ -7,14 +7,8 @@ use super::game::GameRunningContext;
 use super::settings::SettingsContext;
 use super::tileset::ensure_default;
 
-/// Directory all map files are looked up in. Relative paths typed into the
-/// menu are resolved under this folder; absolute paths or paths that already
-/// start with this folder are used verbatim (escape hatch for power users).
 pub(crate) const MAPS_DIR: &str = "maps";
 
-/// Resolve a user-entered map path against `MAPS_DIR`. Absolute paths and
-/// paths already rooted in `maps/` pass through unchanged. Shared with the
-/// editor hub, which hosts the map-editor Open/New flow.
 pub(crate) fn resolve_map_path(s: &str) -> String {
     let p = Path::new(s);
     if p.is_absolute() || p.starts_with(MAPS_DIR) {
@@ -24,7 +18,6 @@ pub(crate) fn resolve_map_path(s: &str) -> String {
     }
 }
 
-// ── Game sub-menu state (owned by MainMenuContext) ─────────────────────────────
 enum GameSub {
     Hidden,
     Open { map_path: String },
@@ -34,11 +27,6 @@ impl GameSub {
     fn is_visible(&self) -> bool { !matches!(self, GameSub::Hidden) }
 }
 
-// ── Main menu ──────────────────────────────────────────────────────────────────
-// Top-level entry point. "Run" launches gameplay; "Editor" opens the editor hub
-// (EditorMenuContext), which in turn hosts the map editor, tileset editor, and
-// game-data editor. The editor sub-screens used to live here directly — they were
-// moved to the hub to keep this menu uncluttered as more editors are added.
 pub struct MainMenuContext {
     pending_transition: Option<Box<dyn GameContext>>,
     game_sub: GameSub,
@@ -47,10 +35,6 @@ pub struct MainMenuContext {
 
 impl MainMenuContext {
     pub fn new() -> Self {
-        // Make sure tilesets/Default.txt exists so the Settings tileset dropdown
-        // always has at least one option, and Run/Editor have a real file to
-        // resolve to when the user hasn't picked anything else yet. Migrates a
-        // legacy root-level id.txt on first run; otherwise creates it empty.
         let _ = ensure_default();
         MainMenuContext {
             pending_transition: None,
@@ -66,7 +50,6 @@ impl GameContext for MainMenuContext {
     }
 
     fn draw(&mut self, engine: &mut Engine) {
-        // Boolean flags written inside the closure, acted on after it returns.
         let mut toggle_game   = false;
         let mut confirm_game  = false;
         let mut continue_game = false;
@@ -74,7 +57,6 @@ impl GameContext for MainMenuContext {
         let mut go_settings   = false;
         let mut quit_app      = false;
 
-        // A Continue button appears only when a saved session exists.
         let has_save = SaveGame::exists();
 
         let (w, h) = engine.screen_size();
@@ -87,7 +69,6 @@ impl GameContext for MainMenuContext {
                     ui.heading("RustEngine");
                     ui.add_space(16.0);
 
-                    // ── Continue (only when a save exists) ──
                     if has_save {
                         if ui.add_sized([160.0, 40.0], egui::Button::new("Continue")).clicked() {
                             continue_game = true;
@@ -95,7 +76,6 @@ impl GameContext for MainMenuContext {
                         ui.add_space(8.0);
                     }
 
-                    // ── New Game ──
                     let game_fill = if self.game_sub.is_visible() {
                         egui::Color32::from_rgb(80, 100, 180)
                     } else {
@@ -123,18 +103,15 @@ impl GameContext for MainMenuContext {
                     }
                     ui.add_space(8.0);
 
-                    // ── Editor (opens the editor hub) ──
                     if ui.add_sized([160.0, 40.0], egui::Button::new("Editor")).clicked() {
                         go_editor = true;
                     }
 
-                    // ── Settings ──
                     ui.add_space(8.0);
                     if ui.add_sized([160.0, 40.0], egui::Button::new("Settings")).clicked() {
                         go_settings = true;
                     }
 
-                    // ── Quit (smaller, sits below) ──
                     ui.add_space(16.0);
                     if ui.add_sized([100.0, 28.0], egui::Button::new("Quit")).clicked() {
                         quit_app = true;
@@ -147,8 +124,6 @@ impl GameContext for MainMenuContext {
                 });
             });
         });
-
-        // ── Act on flags now that the closure (and its borrows) have ended ──
 
         if toggle_game {
             self.error_msg = None;
@@ -175,8 +150,6 @@ impl GameContext for MainMenuContext {
         }
 
         if continue_game {
-            // Resume the saved session. Validate the referenced files still
-            // exist (map or tileset may have been moved/deleted since saving).
             match SaveGame::load() {
                 Some(save) if !Path::new(&save.map).exists() => {
                     self.error_msg = Some(format!("Saved map not found: {}", save.map));

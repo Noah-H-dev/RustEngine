@@ -1,19 +1,3 @@
-// ── Editor hub ───────────────────────────────────────────────────────────────
-//
-// Landing screen reached from the main menu's "Editor" button. It groups the
-// growing set of editors so the main menu stays small:
-//
-//   * Map Editor   — opens / creates a map file, then enters `EditorContext`.
-//                    The Open File / New File forms live here (they used to be
-//                    on the main menu).
-//   * Tileset Editor — abstract tile definitions + per-tileset PNG skins
-//                    (`TilesetEditorContext`).
-//   * Game         — game-data editors (creatures now; items / feats / spells
-//                    later) in `GameEditorContext`.
-//
-// The tileset used by the map editor is the global `Settings.active_tileset`,
-// chosen in Settings — it is not asked here.
-
 use RustEngine::game::game_engine::{Engine, GameContext, TILE_SIZE};
 
 use super::editor::EditorContext;
@@ -21,7 +5,6 @@ use super::game_editor::GameEditorContext;
 use super::menus::{resolve_map_path, MainMenuContext};
 use super::tileset_editor::TilesetEditorContext;
 
-// ── Map-editor file sub-form state ─────────────────────────────────────────────
 enum MapSub {
     Hidden,
     Open { map_path: String },
@@ -33,7 +16,6 @@ impl MapSub {
     fn is_open(&self)    -> bool { matches!(self, MapSub::Open { .. }) }
     fn is_new(&self)     -> bool { matches!(self, MapSub::New  { .. }) }
 
-    /// Preserve the map path the user has already typed when switching sub-forms.
     fn current_map_path(&self) -> String {
         match self {
             MapSub::Open { map_path } |
@@ -65,7 +47,6 @@ impl GameContext for EditorMenuContext {
     }
 
     fn draw(&mut self, engine: &mut Engine) {
-        // Flags written inside the egui closure, acted on after it returns.
         let mut go_back      = false;
         let mut toggle_map   = false;
         let mut show_open    = false;
@@ -92,18 +73,15 @@ impl GameContext for EditorMenuContext {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.add_space(ui.available_height() / 5.0);
                 ui.vertical_centered(|ui| {
-                    // ── Editor buttons in a single horizontal row ──
                     let map_fill = if self.map_sub.is_visible() {
                         egui::Color32::from_rgb(80, 100, 180)
                     } else {
                         ui.visuals().widgets.inactive.bg_fill
                     };
                     ui.horizontal(|ui| {
-                        // Center the row: three 180-wide buttons + two 8px gaps.
                         let row_w = 180.0 * 3.0 + 8.0 * 2.0;
                         let pad = (ui.available_width() - row_w) / 2.0;
                         if pad > 0.0 { ui.add_space(pad); }
-                        // Map Editor (expands the Open / New file forms below).
                         if ui.add_sized([180.0, 40.0], egui::Button::new("Map Editor").fill(map_fill)).clicked() {
                             toggle_map = true;
                         }
@@ -117,7 +95,6 @@ impl GameContext for EditorMenuContext {
                         }
                     });
 
-                    // Open File / New File sub-buttons (centered row).
                     if self.map_sub.is_visible() {
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
@@ -144,7 +121,6 @@ impl GameContext for EditorMenuContext {
                         });
                     }
 
-                    // File form (shown below when Open or New is active).
                     ui.add_space(8.0);
                     match &mut self.map_sub {
                         MapSub::Open { map_path } => {
@@ -188,7 +164,6 @@ impl GameContext for EditorMenuContext {
             });
         });
 
-        // ── Act on flags ──
         if go_back {
             self.pending = Some(Box::new(MainMenuContext::new()));
             return;

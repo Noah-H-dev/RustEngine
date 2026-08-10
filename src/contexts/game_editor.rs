@@ -1,22 +1,3 @@
-// ── Game-data editor ───────────────────────────────────────────────────────────
-//
-// Tabbed editor for game-data templates, reached from the editor hub's "Game"
-// button. Tabs:
-//
-//   * Creature — define unit templates (name, sprite, stats) written to
-//     `units.toml`. This is the creature *creator*: it owns create / edit /
-//     delete of templates and the "+ Add PNG" flow that mints a Creatures-
-//     category tile def. The map editor's Spawner tab only *places* these
-//     templates onto a map (positions / patrols); it no longer creates them.
-//   * Item / Feat / Spell — placeholders for now.
-//
-// Definition (here) and placement (map editor) both round-trip the whole
-// `UnitRecord`, so editing stats here preserves a template's placed positions
-// and vice-versa. The two never run at once (separate contexts).
-//
-// Follows the intent/apply pattern of the other egui contexts: the closure only
-// writes into `Intent`; all state mutation happens afterward in `apply`.
-
 use RustEngine::game::game_engine::{Engine, GameContext, UnitFile, UnitRecord};
 use RustEngine::game::stats::stats;
 use RustEngine::tools::load_textures;
@@ -42,7 +23,6 @@ impl GameTab {
     }
 }
 
-// ── Creature create/edit FSM ───────────────────────────────────────────────────
 enum CreatureMode {
     Idle,
     Creating,
@@ -52,22 +32,14 @@ enum CreatureMode {
 #[derive(Clone, Copy)]
 enum FormAction { OpenCreate, OpenEdit(usize), Confirm, Cancel }
 
-/// Ephemeral state while creating or editing a creature template.
 #[derive(Clone)]
 struct CreatureDraft {
     name: String,
     sprite_id: Option<i32>,
-    /// True when `sprite_id` points at a creature def freshly minted by this
-    /// form's "+ Add PNG"; its name is synced to the unit's final name on
-    /// Confirm. Cleared when the user picks an existing sprite instead.
     sprite_def_is_new: bool,
     health: i64,
     speed: f64,
     defense: f64,
-    /// The unit's full stats carried through the edit. The form exposes the
-    /// fields above; every other stat field (and any future one) rides along
-    /// here so it is preserved on edit and defaulted on create, rather than
-    /// being zeroed each time the unit is saved.
     base_stats: stats,
 }
 
@@ -85,7 +57,6 @@ impl CreatureDraft {
         }
     }
 
-    /// The stats to persist: the carried base with the form-edited fields applied.
     fn build_stats(&self) -> stats {
         let mut st = self.base_stats.clone();
         st.health  = self.health;
@@ -95,7 +66,6 @@ impl CreatureDraft {
     }
 }
 
-/// UI intents collected during one `draw`, applied afterward.
 #[derive(Default)]
 struct Intent {
     back:             bool,
@@ -112,8 +82,6 @@ pub struct GameEditorContext {
     mode:      CreatureMode,
     draft:     CreatureDraft,
     tile_defs: TileDefs,
-    /// Active tileset (id -> png file), needed for the sprite picker and the
-    /// "+ Add PNG" flow. Mirrors `Settings.active_tileset`.
     id_path:   String,
     pending:   Option<Box<dyn GameContext>>,
 }
@@ -145,8 +113,6 @@ impl GameEditorContext {
         }
     }
 
-    /// Creature sprite choices: (id, png) pairs from the active tileset whose
-    /// tile def is in the Creatures category.
     fn creature_sprites(&self) -> Vec<(i32, String)> {
         let mut v: Vec<(i32, String)> = load_textures(&self.id_path)
             .into_iter()
@@ -156,9 +122,6 @@ impl GameEditorContext {
         v
     }
 
-    /// "+ Add PNG": pick a PNG, copy into assets/ if needed, mint a new
-    /// Creatures-category tile def, assign the PNG in the active tileset, and
-    /// select it as the draft sprite (marked owned so Confirm syncs its name).
     fn add_creature_png(&mut self) {
         let Some(picked) = rfd::FileDialog::new()
             .add_filter("PNG Image", &["png"])
@@ -170,7 +133,6 @@ impl GameEditorContext {
         if !dest.exists() {
             let _ = std::fs::copy(&picked, &dest);
         }
-        // Seed name from the draft (final name synced on Confirm).
         let tile_name = {
             let n = self.draft.name.trim();
             if n.is_empty() { None } else { Some(n.to_string()) }
@@ -185,7 +147,6 @@ impl GameEditorContext {
     }
 
     fn apply(&mut self, intent: Intent, draft_name: String, draft_health: i64, draft_speed: f64, draft_defense: f64) {
-        // Mirror draft edits back while a form is open.
         if matches!(self.mode, CreatureMode::Creating | CreatureMode::Editing { .. }) {
             self.draft.name    = draft_name;
             self.draft.health  = draft_health;
@@ -255,7 +216,6 @@ impl GameEditorContext {
                     CreatureMode::Idle => {}
                 }
                 self.save_units();
-                // Sync an owned, freshly-added sprite def's name to the final name.
                 if self.draft.sprite_def_is_new {
                     if let Some(sid) = self.draft.sprite_id {
                         let name = self.draft.name.trim();
@@ -278,7 +238,6 @@ impl GameContext for GameEditorContext {
     fn draw(&mut self, engine: &mut Engine) {
         let mut intent = Intent::default();
 
-        // Snapshots taken before the closure to avoid borrow conflicts.
         let tab        = self.tab;
         let form_open  = matches!(self.mode, CreatureMode::Creating | CreatureMode::Editing { .. });
         let is_editing = matches!(self.mode, CreatureMode::Editing { .. });

@@ -1,26 +1,26 @@
-use serde::{Deserialize, Serialize};
 use crate::game::ability::Effect;
 use crate::game::stats::stats;
 use crate::shaders::{FRAG_SHADER, VERT_SHADER};
-use crate::tools::{load_textures, GLObject, BL_RECTANGLE};
+use crate::tools::{BL_RECTANGLE, GLObject, load_textures};
+use serde::{Deserialize, Serialize};
 pub const ITEMS_PATH: &str = "gamedata/items.toml";
-#[derive(Serialize,Deserialize,Default)]
-pub struct ItemFile{
+#[derive(Serialize, Deserialize, Default)]
+pub struct ItemFile {
     #[serde(rename = "item")]
     #[serde(default)]
-    items: Vec<ItemRecord>
+    items: Vec<ItemRecord>,
 }
 #[derive(Serialize, Deserialize)]
-pub struct ItemRecord{
+pub struct ItemRecord {
     pub name: String,
-    pub position:(i32,i32),
+    pub position: (i32, i32),
     pub carried: bool,
     pub id: i32,
     pub class: item_type,
     pub mods: stats_mod,
     pub action_list: Actions,
 }
-pub fn load_items(id_path:&str) -> Vec<item>{
+pub fn load_items(id_path: &str) -> Vec<item> {
     let mut itemVec: Vec<item> = Vec::new();
     let textures = load_textures(id_path);
     if !std::path::Path::new(ITEMS_PATH).exists() {
@@ -34,21 +34,26 @@ pub fn load_items(id_path:&str) -> Vec<item>{
                 itemRecord.name,
                 itemRecord.position,
                 itemRecord.carried,
-                GLObject::new(BL_RECTANGLE, &format!("assets/{}", tex_path), VERT_SHADER, FRAG_SHADER),
+                GLObject::new(
+                    BL_RECTANGLE,
+                    &format!("assets/{}", tex_path),
+                    VERT_SHADER,
+                    FRAG_SHADER,
+                ),
                 itemRecord.id,
                 itemRecord.class,
                 itemRecord.mods,
-                itemRecord.action_list
+                itemRecord.action_list,
             ));
         }
     }
 
     return itemVec;
 }
-pub fn store_items(items: &[item]){
+pub fn store_items(items: &[item]) {
     let mut storage: ItemFile = Default::default();
     for item in items {
-        storage.items.push(ItemRecord{
+        storage.items.push(ItemRecord {
             name: item.name.clone(),
             position: item.position,
             carried: item.carried,
@@ -64,22 +69,19 @@ pub fn store_items(items: &[item]){
     }
 }
 
-
-//lots of work to be done. give each enum field a personal struct which holds their data
-//im jumping the gun here, I need to impliment attaching and "turns" before I get to this.
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub enum GearType {
     #[default]
     HEAD,
     BODY,
     FEET,
-    BELT
+    BELT,
 }
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Armor {
     defense: i32,
     stat_mods: stats_mod,
-    effects: Vec<Effect>
+    effects: Vec<Effect>,
 }
 #[derive(Serialize, Deserialize, Clone)]
 pub enum WeaponType {
@@ -91,7 +93,7 @@ pub enum MeleeType {
     SWORD,
     AXE,
     HAMMER,
-    SPEAR
+    SPEAR,
 }
 #[derive(Serialize, Deserialize, Clone)]
 pub enum FirearmType {
@@ -99,67 +101,89 @@ pub enum FirearmType {
     RIFLE,
     SHOTGUN,
     MINIGUN,
-    CANNON
+    CANNON,
 }
 #[derive(Serialize, Deserialize, Clone)]
 pub enum ConsumeableType {
     TRAP,
     THROWABLE,
     FOOD,
-    MEDICAL
+    MEDICAL,
 }
 #[derive(Serialize, Deserialize, Clone)]
-pub enum ammo_type{
-    MUSKET {am: ammunition},
-    NineMill {am: ammunition},
-    TwelveGauge {am: ammunition},
-    FiveFiveSix {am: ammunition}
+pub enum ammo_type {
+    MUSKET { am: ammunition },
+    NineMill { am: ammunition },
+    TwelveGauge { am: ammunition },
+    FiveFiveSix { am: ammunition },
 }
 #[derive(Serialize, Deserialize, Clone)]
-pub struct ammunition{
+pub struct ammunition {
     quantity: i32,
-    damage: i32
+    damage: i32,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone)]
-pub enum item_type{
-    WEAPON{wt: WeaponType },
-    GEAR {gt: GearType },
-    CONSUMABLE {ct: ConsumeableType },
-    AMMUNITION{at: ammo_type},
+pub enum item_type {
+    WEAPON {
+        wt: WeaponType,
+    },
+    GEAR {
+        gt: GearType,
+    },
+    CONSUMABLE {
+        ct: ConsumeableType,
+    },
+    AMMUNITION {
+        at: ammo_type,
+    },
     KEY,
     TOOL,
     VALUABLE,
     #[default]
-    CHAFF
+    CHAFF,
 }
 #[derive(Serialize, Deserialize, Default, Clone)]
-pub struct stats_mod{
-    mods: stats //just piggybacking stats
+pub struct stats_mod {
+    mods: stats,
 }
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct Actions {
-    pub unequip: bool
+    pub unequip: bool,
 }
 
-
-
-pub struct item{
+pub struct item {
     pub name: String,
-    pub position: (i32,i32), //inherit from a field getting added to Unit
+    pub position: (i32, i32),
     pub carried: bool,
     pub sprite: GLObject,
     pub sprite_id: i32,
     pub class: item_type,
     pub mods: stats_mod,
     pub action_list: Actions,
-
-    //add Effects here, maybe call it a struct mod or something
 }
 
-impl item{
-    pub fn new(name: String, position: (i32,i32), carried: bool, sprite: GLObject, sprite_id:i32, class:item_type, mods: stats_mod, action_list: Actions) -> item {
-        item{name,position,carried,sprite,sprite_id, class, mods, action_list}
+impl item {
+    pub fn new(
+        name: String,
+        position: (i32, i32),
+        carried: bool,
+        sprite: GLObject,
+        sprite_id: i32,
+        class: item_type,
+        mods: stats_mod,
+        action_list: Actions,
+    ) -> item {
+        item {
+            name,
+            position,
+            carried,
+            sprite,
+            sprite_id,
+            class,
+            mods,
+            action_list,
+        }
     }
     pub fn draw(&self, camera: (i32, i32)) {
         use super::game_engine::TILE_SIZE;

@@ -1,70 +1,9 @@
-// ══════════════════════════════════════════════════════════════════════════════
-// HOW THIS EDITOR WORKS — AND HOW TO EXTEND IT
-// ══════════════════════════════════════════════════════════════════════════════
-//
-// ── The context system ────────────────────────────────────────────────────────
-// Every screen in the game (menu, gameplay, editor, settings) is a struct that
-// implements `GameContext` (defined in game_engine.rs).  The trait has two
-// methods:
-//
-//   fn update(&mut self, engine, dt) -> Option<Box<dyn GameContext>>
-//   fn draw(&mut self, engine)
-//
-// Returning Some(next) from `update` swaps the running context.  `EditorContext`
-// exits by setting `pending_exit = true`, which `update` picks up and returns
-// `Some(Box::new(MainMenuContext::new()))`.
-//
-// To make a brand-new screen/context:
-//   1. Create `src/contexts/my_screen.rs`, define a `pub struct MyScreenContext`.
-//   2. `impl GameContext for MyScreenContext` with your `update` and `draw`.
-//   3. Add `mod my_screen;` and a `pub use` line in `src/contexts/mod.rs`.
-//   4. Transition into it from any other context by returning it from `update`.
-//
-// ── The intent / handler pattern ─────────────────────────────────────────────
-// `draw` is split into two phases because the egui closure borrows `engine`
-// exclusively — you cannot call `&mut self` methods inside it.
-//   Phase 1 (inside the closure): write UI events into `EditorIntent` fields.
-//   Phase 2 (after the closure):  hand `intent` to per-feature handler methods
-//                                 (`handle_paint`, `handle_spawner`, …).
-// Add new UI inputs by adding a field to `EditorIntent`, setting it inside the
-// closure, and reacting to it in the matching `handle_*` method (or adding a
-// new handler if it's a whole new feature).
-//
-// ── Adding a new tab to the right panel ──────────────────────────────────────
-// The right panel has three tabs controlled by `RightPanelTab`.  To add one:
-//   1. Add a variant to `RightPanelTab` (e.g. `EventPainter`).
-//   2. In `draw`, find the `ui.selectable_label` row and add your tab button.
-//   3. Add a `RightPanelTab::EventPainter => { … }` arm to the `match active_tab`
-//      block to render the panel content.
-//   4. Add any new intent fields the panel needs and react to them in a handler.
-//
-// ── Adding a new field / feature to EditorContext ────────────────────────────
-// All runtime state lives in `EditorContext`. Initialise new fields in the
-// single `with_world` constructor (both `from_file` and `new_map` call it).
-// For FSM-style features (e.g. a multi-step dialog), follow the `FolderEdit`
-// pattern: define a state enum on `EditorContext`, mirror its text buffer in /
-// out of `EditorIntent`, and apply transitions in a dedicated handler method.
-//
-// ── Persisting new data ───────────────────────────────────────────────────────
-// Map tile data is saved via `World::save` (called when `intent.do_save` is set).
-// Unit templates and their placements live in `units.toml` and are written by
-// `save_units()`.  If you add a new type of placed object, follow the same
-// pattern: a TOML-backed file, a `load_*` helper called from `with_world`, and
-// a `save_*` helper called whenever state changes.
-//
-// ── Key helpers ───────────────────────────────────────────────────────────────
-//   screen_to_tile_idx  — converts an egui Pos2 into an index into world.tiles
-//   build_sprite_cache  — loads GLObjects keyed by palette id for drawing sprites
-// ══════════════════════════════════════════════════════════════════════════════
-
 use RustEngine::game::game_engine::{Engine, GameContext, World, TILE_SIZE, UnitRecord, UnitFile};
 use RustEngine::tools::{load_textures, GLObject, BL_RECTANGLE};
 use RustEngine::shaders::{VERT_SHADER, FRAG_SHADER};
 use std::collections::HashMap;
 use super::menus::MainMenuContext;
 use super::tiledefs::{Category, TileDefs};
-
-// ── Editor ─────────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq)]
 enum RightPanelTab {
@@ -73,17 +12,11 @@ enum RightPanelTab {
     CharacterSpawner,
 }
 
-/// Tile palette entry. Rows are labelled by `label_of` in the Textures panel
-/// (prefers the tile-def name, falls back to the PNG filename).
 struct PaletteEntry {
     id: i32,
     path: String,
 }
 
-/// Render one texture row in the palette: a selectable label (caller composes
-/// it — typically `id | <tile-def name>`), with a `...` menu on the far right
-/// holding the collision dropdown and the move-to-folder submenu. Emits intents
-/// only — never mutates editor state directly.
 fn texture_row(
     ui: &mut egui::Ui,
     entry: &PaletteEntry,
@@ -98,7 +31,6 @@ fn texture_row(
         if ui.selectable_label(selected, label).clicked() {
             intent.new_selected = Some(entry.id);
         }
-        // Push the overflow menu to the far right of the row.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.menu_button("...", |ui| {
                 ui.menu_button("Default collision", |ui| {
@@ -135,32 +67,17 @@ fn texture_row(
     });
 }
 
-// ── Folder-naming FSM ────────────────────────────────────────────────────────
-// Inline text input shown at the top of the Textures panel, used both to name a
-// brand-new folder (while moving a texture into it) and to rename an existing
-// folder. State lives in EditorContext::folder_edit; applied in handle_folders.
 enum FolderEdit {
     Idle,
-    /// Typing a name for a new folder; the texture moves into it on confirm.
     NamingNew { texture_id: i32, name: String },
-    /// Renaming an existing folder; all member textures are reassigned on confirm.
     Renaming  { from: String, to: String },
 }
-
-// ── Spawner FSM ──────────────────────────────────────────────────────────────
-// The Spawner tab *places* unit templates onto the map — it no longer creates
-// or edits them (that moved to the Game editor's Creature tab). State lives in
-// EditorContext::spawner_mode. PatrolPainting is entered from a map click
-// (handle_unit_clicks) and exited via Esc (handle_patrol).
 
 enum SpawnerMode {
     Idle,
     PatrolPainting { unit_id: u32, instance_idx: usize },
 }
 
-/// What's selected as the spawner-tab brush. `Unit(id)` paints unit instances
-/// (existing behavior). `PlayerSpawn` paints / clears the per-map player
-/// spawnpoint stored on `World::spawn` — max 1 per map.
 #[derive(Clone, Copy, PartialEq)]
 enum SpawnerBrush {
     None,
@@ -168,43 +85,32 @@ enum SpawnerBrush {
     PlayerSpawn,
 }
 
-/// All UI intents collected during one `draw` call. The egui closure writes
-/// here; post-closure handlers read from here. Default = "nothing happened".
 #[derive(Default)]
 struct EditorIntent {
-    // Toolbar
     do_save:           bool,
     do_exit:           bool,
     toggle_panel:      bool,
     new_selected:      Option<i32>,
     new_tab:           Option<RightPanelTab>,
     new_physics_brush: Option<bool>,
-    // Central-panel paint input (texture / physics painters)
     paint_pos: Option<egui::Pos2>,
     click_pos: Option<egui::Pos2>,
     erase_pos: Option<egui::Pos2>,
-    // Held right-mouse erase on the texture tab.
     erase_paint_pos: Option<egui::Pos2>,
-    // Patrol-painting input
     patrol_click_pos: Option<egui::Pos2>,
     patrol_erase_pos: Option<egui::Pos2>,
     patrol_esc:       bool,
-    // Spawner panel — placement only (creation lives in the Game editor).
     new_spawner_brush:    Option<SpawnerBrush>,
-    // Set a texture's default collision: (texture id, solid).
     set_texture_solid: Option<(i32, bool)>,
-    // Folder management
-    move_to_folder:      Option<(i32, Option<String>)>, // move texture to folder (None = loose)
-    start_new_folder:    Option<i32>,                   // open new-folder input for this texture
-    start_rename_folder: Option<String>,                // open rename input for this folder
-    delete_folder:       Option<String>,                // dissolve folder, members become loose
-    folder_confirm:      bool,                           // confirm the active folder input
-    folder_cancel:       bool,                           // cancel the active folder input
-    // Resize dialog
+    move_to_folder:      Option<(i32, Option<String>)>,
+    start_new_folder:    Option<i32>,
+    start_rename_folder: Option<String>,
+    delete_folder:       Option<String>,
+    folder_confirm:      bool,
+    folder_cancel:       bool,
     open_resize_dialog:  bool,
     confirm_resize:      Option<(usize, usize)>,
     close_resize_dialog: bool,
-    // Camera pan / zoom
     cam_scroll_y:  f32,
     cam_pan_delta: Option<egui::Vec2>,
     cam_cursor:    Option<egui::Pos2>,
@@ -217,32 +123,23 @@ pub struct EditorContext {
     palette: Vec<PaletteEntry>,
     selected_id: Option<i32>,
     pending_exit: bool,
-    /// False until the first draw call, when we center the camera on the map.
     camera_init: bool,
     active_tab: RightPanelTab,
-    /// Physics painter brush: true = paint solid, false = paint passable.
     physics_brush_solid: bool,
     right_panel_open: bool,
     spawner_mode: SpawnerMode,
     spawner_units: Vec<UnitRecord>,
-    /// Active brush for the Spawner tab — a unit template, the player-spawn
-    /// marker, or nothing selected.
     spawner_brush: SpawnerBrush,
-    /// Cached GLObjects keyed by palette id, used to draw unit sprites in the editor.
     unit_sprite_cache: HashMap<i32, GLObject>,
-    /// Some((draft_w, draft_h)) while the resize dialog is open.
     resize_dialog: Option<(usize, usize)>,
     zoom: f32,
-    /// Shared tile definitions (collision default, folder, name, future options).
     tile_defs: TileDefs,
-    /// Inline folder-name input state (new folder / rename folder).
     folder_edit: FolderEdit,
 }
 
 impl EditorContext {
     const UNITS_PATH: &'static str = "gamedata/units.toml";
 
-    /// Open an existing map file for editing.
     pub fn from_file(map_path: &str, id_path: &str) -> Result<Self, String> {
         if !std::path::Path::new(map_path).exists() {
             return Err(format!("Map file not found: {}", map_path));
@@ -253,7 +150,6 @@ impl EditorContext {
         Ok(Self::with_world(World::load(map_path, id_path), map_path, id_path))
     }
 
-    /// Create a new blank map of the given dimensions.
     pub fn new_map(map_path: &str, id_path: &str, width: usize, height: usize) -> Result<Self, String> {
         if !std::path::Path::new(id_path).exists() {
             return Err(format!("ID file not found: {}", id_path));
@@ -296,17 +192,13 @@ impl EditorContext {
                 } else if std::path::Path::new(FALLBACK).exists() {
                     FALLBACK.to_string()
                 } else {
-                    return None; // neither file nor fallback exists — skip
+                    return None;
                 };
                 Some((e.id, GLObject::new(BL_RECTANGLE, &resolved, VERT_SHADER, FRAG_SHADER)))
             })
             .collect()
     }
 
-    /// Build the palette purely from the loaded tileset (`id_path`) — the
-    /// tileset is the source of truth for what's paintable. Stray PNGs in
-    /// `assets/` that aren't bound to a tile in the active tileset do NOT
-    /// appear here; add them via the Tileset editor's "Assign PNG" flow first.
     fn load_palette(id_path: &str) -> Vec<PaletteEntry> {
         if !std::path::Path::new(id_path).exists() {
             return Vec::new();
@@ -334,16 +226,10 @@ impl EditorContext {
         std::fs::write(Self::UNITS_PATH, content).expect("Failed to save units.toml");
     }
 
-    /// Convert a screen-space position (egui coords, y=0 at top) to a
-    /// tile index into `self.world.tiles`, accounting for the engine camera.
-    /// World coords are snapped down to the nearest TILE_SIZE multiple first.
     fn screen_to_tile_idx(&self, sx: f32, sy: f32, screen_h: u32, camera: (i32, i32), zoom: f32) -> Option<usize> {
-        // OpenGL y=0 is bottom; egui y=0 is top — flip y.
-        // Divide by zoom to convert screen pixels back to world pixels before adding camera offset.
         let world_x = (sx / zoom) as i32 + camera.0;
         let world_y = ((screen_h as f32 - sy) / zoom) as i32 + camera.1;
         if world_x < 0 || world_y < 0 { return None; }
-        // Snap to tile grid (floor to nearest TILE_SIZE multiple).
         let tx = (world_x / TILE_SIZE) as usize;
         let ty = (world_y / TILE_SIZE) as usize;
         if tx >= self.world.width || ty >= self.world.height { return None; }
@@ -354,7 +240,6 @@ impl EditorContext {
         self.palette.iter().find(|e| e.id == id).map(|e| e.path.as_str())
     }
 
-    /// Returns the (unit_id, instance_idx) of the first placed unit at `tile_pos`.
     fn find_unit_at_tile(&self, tile_pos: (i32, i32)) -> Option<(u32, usize)> {
         for record in &self.spawner_units {
             if let Some(i) = record.positions.iter().position(|&p| p == tile_pos) {
@@ -368,8 +253,6 @@ impl EditorContext {
         self.spawner_units.iter_mut().find(|u| u.id == id)
     }
 
-    /// Resolve a screen-space pointer position to a tile and invoke `f` with
-    /// `(self, tile_idx, tile_position)`. No-op when the pointer is off-map.
     fn at_tile<F>(&mut self, pos: egui::Pos2, screen_h: u32, camera: (i32, i32), f: F)
     where
         F: FnOnce(&mut Self, usize, (i32, i32)),
@@ -381,9 +264,6 @@ impl EditorContext {
         }
     }
 
-    // ── Intent handlers (called after the egui closure returns) ───────────────
-
-    /// Held-mouse painting on the texture / physics tabs. No-op on the spawner tab.
     fn handle_paint(&mut self, active_tab: RightPanelTab, intent: &EditorIntent, screen_h: u32, camera: (i32, i32)) {
         if let Some(pos) = intent.paint_pos {
             self.at_tile(pos, screen_h, camera, |this, idx, _tp| match active_tab {
@@ -391,9 +271,6 @@ impl EditorContext {
                     if let Some(sel_id) = this.selected_id {
                         let tex = if sel_id == 0 { None } else { this.texture_for_id(sel_id).map(str::to_owned) };
                         this.world.tiles[idx].set_sprite(sel_id, tex.as_deref());
-                        // Stamp this texture's default collision onto the tile.
-                        // The Physics tab can still override individual tiles afterward.
-                        // Eraser (id 0) leaves collision untouched.
                         if sel_id != 0 {
                             let solid = this.tile_defs.solid_of(sel_id);
                             this.world.tiles[idx].physics.solid = solid;
@@ -406,7 +283,6 @@ impl EditorContext {
                 RightPanelTab::CharacterSpawner => {}
             });
         }
-        // Held right-mouse on the texture tab erases whatever tile the cursor is over.
         if active_tab == RightPanelTab::TexturePalette {
             if let Some(pos) = intent.erase_paint_pos {
                 self.at_tile(pos, screen_h, camera, |this, idx, _tp| {
@@ -416,41 +292,27 @@ impl EditorContext {
         }
     }
 
-    /// Single click / right-click on the map while the spawner tab is active.
-    /// Left-click on empty + brush selected → place. Left-click on a unit → patrol.
-    /// Right-click on a unit → delete the instance.
     fn handle_unit_clicks(&mut self, active_tab: RightPanelTab, intent: &EditorIntent, screen_h: u32, camera: (i32, i32)) {
         if active_tab != RightPanelTab::CharacterSpawner { return; }
         let brush = self.spawner_brush;
 
-        // Player-spawn brush has its own click semantics — no unit interaction.
         if brush == SpawnerBrush::PlayerSpawn {
             if let Some(pos) = intent.click_pos {
                 self.at_tile(pos, screen_h, camera, |this, _idx, tile_pos| {
-                    // Overwrites any existing spawn (max 1 per map). Allowed on
-                    // solid tiles for now — the player will simply be stuck if
-                    // it's not walkable, which is the user's choice.
                     this.world.spawn = Some(tile_pos);
                 });
             }
             if intent.erase_pos.is_some() {
-                // Right-click clears the spawn regardless of which tile is
-                // under the cursor — there's only ever one to clear.
                 self.world.spawn = None;
             }
             return;
         }
 
-        // Unit brush (or no brush) — original behaviour.
         if let Some(pos) = intent.click_pos {
             self.at_tile(pos, screen_h, camera, |this, idx, tile_pos| {
                 if let Some((unit_id, instance_idx)) = this.find_unit_at_tile(tile_pos) {
-                    // Click on a placed unit → enter patrol painting for that instance.
-                    // The right panel auto-hides via the `!is_patrol_painting` render guard.
                     this.spawner_mode = SpawnerMode::PatrolPainting { unit_id, instance_idx };
                 } else if let SpawnerBrush::Unit(sel_id) = brush {
-                    // Empty tile + unit brush selected → place a new instance
-                    // (skip solid tiles).
                     if !this.world.tiles[idx].physics.solid {
                         if let Some(record) = this.find_unit_mut(sel_id) {
                             record.positions.push(tile_pos);
@@ -505,18 +367,11 @@ impl EditorContext {
         }
     }
 
-    /// Spawner tab is placement-only now: the only template-level action here is
-    /// choosing which brush (a unit template or the player-spawn marker) is
-    /// active. Creating / editing / deleting templates lives in the Game editor.
     fn handle_spawner(&mut self, intent: &EditorIntent) {
         if let Some(b) = intent.new_spawner_brush { self.spawner_brush = b; }
     }
 
-    /// Apply folder intents: open/confirm/cancel the inline name input, move a
-    /// texture between folders, and rename or dissolve a folder. Folders are
-    /// implicit, so rename/delete operate by rewriting member tiles' folder.
     fn handle_folders(&mut self, intent: &EditorIntent, folder_text: String) {
-        // Mirror the inline text input back into the FSM.
         match &mut self.folder_edit {
             FolderEdit::NamingNew { name, .. } => *name = folder_text,
             FolderEdit::Renaming  { to, .. }   => *to   = folder_text,
@@ -535,7 +390,6 @@ impl EditorContext {
         }
         if let Some(folder) = &intent.delete_folder {
             if self.tile_defs.clear_folder(folder) { self.tile_defs.save(); }
-            // Drop a rename input that was targeting the now-gone folder.
             if matches!(&self.folder_edit, FolderEdit::Renaming { from, .. } if from == folder) {
                 self.folder_edit = FolderEdit::Idle;
             }
@@ -576,7 +430,6 @@ impl EditorContext {
             self.world.save(&self.map_path);
             self.resize_dialog = None;
         }
-        // Mirror draft values back while dialog is open.
         if let Some(ref mut d) = self.resize_dialog { *d = (draft_w, draft_h); }
     }
 
@@ -610,21 +463,17 @@ impl GameContext for EditorContext {
     fn draw(&mut self, engine: &mut Engine) {
         let mut intent = EditorIntent::default();
 
-        // 1. On the first frame, place the camera so the map starts at the bottom-left.
         let (w, h) = engine.screen_size();
         if !self.camera_init {
             engine.camera = (0, 0);
             self.camera_init = true;
         }
 
-        // 2. Draw the OpenGL world first so the egui overlay appears on top.
         self.world.draw(engine.camera, self.zoom);
 
-        // Screen-space scalars + tile_rect helper used by both the GL pass below
-        // and the egui closure further down.
         let ts    = TILE_SIZE as f32;
         let z     = self.zoom;
-        let tsz   = ts * z;  // tile size in screen pixels at current zoom
+        let tsz   = ts * z;
         let cam_x = engine.camera.0 as f32;
         let cam_y = engine.camera.1 as f32;
         let sh    = h as f32;
@@ -636,26 +485,21 @@ impl GameContext for EditorContext {
             egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x0 + tsz, y0 + tsz))
         };
 
-        // Single pass over placed units: draw the GL sprite (if any) and
-        // accumulate the egui-side position marker overlay.
         let mut unit_overlay: Vec<(egui::Rect, egui::Color32)> = Vec::new();
         for record in &self.spawner_units {
             let gl_obj = record.sprite_id.and_then(|id| self.unit_sprite_cache.get(&id));
             for &(tx, ty) in &record.positions {
                 let r = tile_rect(tx as f32, ty as f32);
                 if let Some(obj) = gl_obj {
-                    // GL y=0 is bottom; convert tile_rect's egui top-y into GL bottom-y.
                     obj.draw(r.min.x as i32, (sh - r.max.y) as i32, tsz);
                 }
                 unit_overlay.push((r, egui::Color32::from_rgba_unmultiplied(60, 200, 180, 160)));
             }
         }
 
-        // 3. Precompute values needed inside the closure (avoids borrow conflicts with tile data).
         let active_tab       = self.active_tab;
         let physics_brush    = self.physics_brush_solid;
         let panel_open       = self.right_panel_open;
-        // Folder-input snapshot: editable name + which mode (new vs rename) is active.
         let folder_naming   = matches!(self.folder_edit, FolderEdit::NamingNew { .. });
         let folder_renaming = matches!(self.folder_edit, FolderEdit::Renaming  { .. });
         let mut folder_text = match &self.folder_edit {
@@ -687,7 +531,6 @@ impl GameContext for EditorContext {
                 vec![]
             };
 
-        // Patrol waypoint nodes for the currently selected unit instance.
         let patrol_nodes: Vec<(egui::Rect, usize)> =
             if let SpawnerMode::PatrolPainting { unit_id, instance_idx } = self.spawner_mode {
                 self.spawner_units.iter()
@@ -701,8 +544,6 @@ impl GameContext for EditorContext {
                     .unwrap_or_default()
             } else { vec![] };
 
-        // Player-spawn marker (only visible in the Spawner tab — like patrol
-        // nodes and physics tint, it's editor metadata, not gameplay).
         let spawn_marker: Option<egui::Rect> = if active_tab == RightPanelTab::CharacterSpawner {
             self.world.spawn.map(|(sx, sy)| tile_rect(sx as f32, sy as f32))
         } else {
@@ -717,11 +558,9 @@ impl GameContext for EditorContext {
         let mut resize_draft_w = self.resize_dialog.map(|(w, _)| w).unwrap_or(self.world.width);
         let mut resize_draft_h = self.resize_dialog.map(|(_, h)| h).unwrap_or(self.world.height);
 
-        // 4. egui overlay: toolbar + right panel + central paint input.
         let camera = engine.camera;
         let input  = engine.egui_input.clone();
         engine.renderer.render(input, w, h, |ctx| {
-            // ── Toolbar ──
             egui::TopBottomPanel::top("editor_toolbar").show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     if ui.button("Save").clicked()   { intent.do_save = true; }
@@ -777,7 +616,6 @@ impl GameContext for EditorContext {
                         }
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // Panel toggle button — rightmost item.
                         let toggle_label = if panel_open { "»" } else { "«" };
                         if ui.button(toggle_label).clicked() { intent.toggle_panel = true; }
                         ui.separator();
@@ -786,7 +624,6 @@ impl GameContext for EditorContext {
                 });
             });
 
-            // ── Right panel with tabs (conditionally shown, never during patrol painting) ──
             if panel_open && !is_patrol_painting {
                 egui::SidePanel::right("right_panel")
                     .min_width(180.0)
@@ -806,7 +643,6 @@ impl GameContext for EditorContext {
 
                         match active_tab {
                             RightPanelTab::TexturePalette => {
-                                // Inline folder-name input (creating a new folder or renaming one).
                                 if folder_naming || folder_renaming {
                                     ui.label(if folder_naming { "New folder name:" } else { "Rename folder:" });
                                     ui.text_edit_singleline(&mut folder_text);
@@ -822,12 +658,7 @@ impl GameContext for EditorContext {
                                 }
                                 ui.separator();
                                 egui::ScrollArea::vertical().show(ui, |ui| {
-                                    // The tile palette only paints map tiles, so it shows
-                                    // Tiles-category defs only. Creatures/Objects live in the
-                                    // Definitions tab of the tileset editor (and the spawner).
                                     let is_tile = |id: i32| self.tile_defs.category_of(id) == Category::Tiles;
-                                    // Folders are implicit: the sorted set of folder names referenced
-                                    // by any Tiles-category entry in the current palette.
                                     let folders: Vec<String> = {
                                         let mut set = std::collections::BTreeSet::new();
                                         for e in &self.palette {
@@ -840,8 +671,6 @@ impl GameContext for EditorContext {
                                     };
                                     let solid_of  = |id: i32| self.tile_defs.solid_of(id);
                                     let folder_of = |id: i32| self.tile_defs.folder_of(id);
-                                    // Prefer the tile-def name; fall back to the PNG filename
-                                    // so unnamed tiles are still distinguishable in the row.
                                     let label_of = |e: &PaletteEntry| -> String {
                                         match self.tile_defs.name_of(e.id) {
                                             Some(n) if !n.is_empty() => format!("{} | {}", e.id, n),
@@ -849,7 +678,6 @@ impl GameContext for EditorContext {
                                         }
                                     };
 
-                                    // Folders first — each a collapsible group with its own ... menu.
                                     for folder in &folders {
                                         let header_id = ui.make_persistent_id(("tex_folder", folder));
                                         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), header_id, true)
@@ -879,7 +707,6 @@ impl GameContext for EditorContext {
                                             });
                                     }
 
-                                    // Loose textures (no folder) below the folders.
                                     for entry in &self.palette {
                                         if entry.id == 0 || !is_tile(entry.id) { continue; }
                                         if folder_of(entry.id).is_some() { continue; }
@@ -900,8 +727,6 @@ impl GameContext for EditorContext {
                                 ui.label("White = passable");
                             }
                             RightPanelTab::CharacterSpawner => {
-                                // Placement only — pick a brush and paint instances on the map.
-                                // Creating / editing creature templates lives in the Game editor.
                                 let spawn_active = spawner_brush == SpawnerBrush::PlayerSpawn;
                                 let spawn_label = if self.world.spawn.is_some() {
                                     "Player Spawn (set)"
@@ -913,7 +738,6 @@ impl GameContext for EditorContext {
                                 }
                                 ui.separator();
 
-                                // Unit template list — click a row to select it as the brush.
                                 egui::ScrollArea::vertical()
                                     .id_salt("spawner_list")
                                     .max_height(220.0)
@@ -940,7 +764,6 @@ impl GameContext for EditorContext {
                     });
             }
 
-            // ── Resize dialog ──
             if resize_open {
                 egui::Window::new("Resize Map")
                     .collapsible(false)
@@ -967,14 +790,12 @@ impl GameContext for EditorContext {
                     });
             }
 
-            // ── Central panel: gridlines + map border + physics overlay + paint input ──
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
                 .show(ctx, |ui| {
                 let rect = ui.available_rect_before_wrap();
                 let painter = ui.painter_at(rect);
 
-                // Grid lines.
                 let grid_stroke = egui::Stroke::new(1.0,
                     egui::Color32::from_rgba_unmultiplied(255, 255, 255, 30));
                 let first_tx = (cam_x / ts).floor() as i32;
@@ -996,7 +817,6 @@ impl GameContext for EditorContext {
                     );
                 }
 
-                // Map border outline.
                 let border_rect = egui::Rect::from_min_max(
                     egui::pos2(-cam_x * z,              sh - (map_h - cam_y) * z),
                     egui::pos2((map_w - cam_x) * z,     sh + cam_y * z),
@@ -1007,17 +827,14 @@ impl GameContext for EditorContext {
                     egui::StrokeKind::Outside,
                 );
 
-                // Physics tint overlay.
                 for (tile_rect, color) in &physics_overlay {
                     painter.rect_filled(*tile_rect, 0.0, *color);
                 }
 
-                // Unit position markers.
                 for (tile_rect, color) in &unit_overlay {
                     painter.rect_filled(*tile_rect, 0.0, *color);
                 }
 
-                // Patrol waypoint nodes + connecting lines.
                 for (a, b) in &patrol_lines {
                     painter.line_segment(
                         [*a, *b],
@@ -1035,8 +852,6 @@ impl GameContext for EditorContext {
                     );
                 }
 
-                // Player-spawn marker — bright yellow tile with an "S" label,
-                // distinct from the green patrol nodes.
                 if let Some(rect) = spawn_marker {
                     painter.rect_filled(
                         rect, 2.0,
@@ -1056,7 +871,6 @@ impl GameContext for EditorContext {
                     );
                 }
 
-                // Paint input: held for texture/physics, single press for spawner/patrol.
                 let (primary_down, primary_pressed, secondary_pressed, secondary_down, pointer_pos, esc,
                      scroll_y, mid_down, mid_delta) =
                     ctx.input(|i| (
@@ -1087,7 +901,6 @@ impl GameContext for EditorContext {
             });
         });
 
-        // 5. Dispatch the intents collected above.
         if intent.toggle_panel                  { self.right_panel_open    = !self.right_panel_open; }
         if let Some(tab)   = intent.new_tab     { self.active_tab          = tab;       }
         if let Some(brush) = intent.new_physics_brush { self.physics_brush_solid = brush; }

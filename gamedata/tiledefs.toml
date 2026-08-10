@@ -25,5 +25,5 @@ category = "creatures"
 [[texture]]
 id = 5
 name = "angry rock"
-solid = false
+solid = true
 category = "creatures"

@@ -1,44 +1,18 @@
-// ── How to extend this settings menu ─────────────────────────────────────────
-//
-// ADDING A NEW SETTING — two places to touch:
-//   1. Add the field to `Settings` in game_engine.rs (e.g. `pub volume: f64`).
-//   2. Add one line to `settings_for_tab` under the right tab:
-//        SettingsTab::Audio => vec![
-//            ("Volume", Number(&mut s.volume)),
-//        ],
-//   Settings save automatically when the user picks Return or Exit to Main Menu.
-//
-// ADDING A NEW TAB
-//   1. Add a variant to `SettingsTab`.
-//   2. Add a `selectable_label` for it in the tab bar inside `draw`.
-//   3. Add a match arm in `settings_for_tab` (start with `vec![]`).
-//
-// ADDING A NEW WIDGET TYPE (slider, dropdown, …)
-//   Extend `SettingValue` with the new variant and `add_setting` with its match arm.
-// ─────────────────────────────────────────────────────────────────────────────
-
 use RustEngine::game::game_engine::{Engine, GameContext, Settings};
 
 use super::menus::MainMenuContext;
 use super::game::GameRunningContext;
 use super::tileset::Tileset;
 
-// ── Setting widgets ──────────────────────────────────────────────────────────
-
 enum SettingValue<'a> {
     Checkbox(&'a mut bool),
     Number(&'a mut f64),
-    /// Dropdown over a fixed set of choices. `value` is the stored selection;
-    /// `options` are (stored value, display label) pairs. If `value` doesn't
-    /// match any option (e.g. a stale entry), it's still shown as the current
-    /// text so the user can see what's set.
     Choice {
         value:   &'a mut String,
         options: Vec<(String, String)>,
     },
 }
 
-/// Renders one labeled setting row and adds consistent spacing below it.
 fn add_setting(ui: &mut egui::Ui, name: &str, value: SettingValue<'_>) {
     match value {
         SettingValue::Checkbox(b) => { ui.checkbox(b, name); }
@@ -49,8 +23,6 @@ fn add_setting(ui: &mut egui::Ui, name: &str, value: SettingValue<'_>) {
             });
         }
         SettingValue::Choice { value, options } => {
-            // Display the matching option's label, or the raw value if it's
-            // not in the list (e.g. a stale or hand-edited setting).
             let current_display = options.iter()
                 .find(|(v, _)| v == value)
                 .map(|(_, d)| d.clone())
@@ -70,18 +42,10 @@ fn add_setting(ui: &mut egui::Ui, name: &str, value: SettingValue<'_>) {
     ui.add_space(4.0);
 }
 
-
-
-
-/// Single source of truth for what settings exist and which tab they live on.
-/// Each entry hands the UI a `&mut` directly into `Settings`, so edits land in
-/// engine state with no mirror/write-back dance.
 fn settings_for_tab<'a>(tab: SettingsTab, s: &'a mut Settings) -> Vec<(&'static str, SettingValue<'a>)> {
     use SettingValue::*;
     match tab {
         SettingsTab::Game  => {
-            // Each .txt file in tilesets/ becomes a dropdown option. Path is the
-            // stored value; the file stem is the display label.
             let tileset_options: Vec<(String, String)> = Tileset::list_in_dir()
                 .into_iter()
                 .map(|p| {
@@ -103,14 +67,6 @@ fn settings_for_tab<'a>(tab: SettingsTab, s: &'a mut Settings) -> Vec<(&'static 
     }
 }
 
-
-
-
-
-
-
-// ── Context ──────────────────────────────────────────────────────────────────
-
 #[derive(Clone, Copy, PartialEq)]
 enum SettingsTab { Game, Video, Audio }
 
@@ -127,7 +83,6 @@ pub struct SettingsContext {
     active_tab:  SettingsTab,
     pending:     Option<Box<dyn GameContext>>,
     do_quit:     bool,
-    /// Set after a successful in-game Save, to show a brief confirmation.
     saved:       bool,
 }
 
@@ -153,7 +108,6 @@ impl SettingsContext {
         }
     }
 
-    /// The context to swap to when the user clicks Return.
     fn return_context(&self) -> Box<dyn GameContext> {
         match &self.return_dest {
             ReturnDest::MainMenu => Box::new(MainMenuContext::new()),
@@ -177,7 +131,6 @@ impl GameContext for SettingsContext {
         let mut action:  Option<SettingsAction> = None;
         let mut new_tab: Option<SettingsTab>    = None;
 
-        // Render the game world behind the overlay when entered from in-game.
         if matches!(self.return_dest, ReturnDest::Game { .. }) {
             engine.world.draw(engine.camera, 1.0);
             for unit in &engine.units {
@@ -186,19 +139,13 @@ impl GameContext for SettingsContext {
         }
 
         let active_tab = self.active_tab;
-        // Save only makes sense in-game (we know which map/tileset to write).
         let from_game  = matches!(self.return_dest, ReturnDest::Game { .. });
         let saved      = self.saved;
         let (w, h)     = engine.screen_size();
         let input      = engine.egui_input.clone();
-        // Hand the closure a reborrowable &mut into settings — disjoint from
-        // engine.renderer, so the closure can mutate settings in place with
-        // no mirror/write-back. Re-listed each pass since egui may invoke
-        // the UI closure multiple times per frame for layout convergence.
         let settings   = &mut engine.settings;
 
         engine.renderer.render(input, w, h, |ctx| {
-            // ── Tab bar pinned to the top ─────────────────────────────────────
             egui::TopBottomPanel::top("settings_tabs").show(ctx, |ui| {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
@@ -212,7 +159,6 @@ impl GameContext for SettingsContext {
                 ui.add_space(6.0);
             });
 
-            // ── Action buttons pinned to the bottom ───────────────────────────
             egui::TopBottomPanel::bottom("settings_actions").show(ctx, |ui| {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -234,7 +180,6 @@ impl GameContext for SettingsContext {
                 ui.add_space(8.0);
             });
 
-            // ── Settings content: top-to-bottom, 1 inch from the left ─────────
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.add_space(16.0);
                 ui.horizontal(|ui| {
